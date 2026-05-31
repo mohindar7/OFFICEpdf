@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960">
+
+    <!-- Scale the 960x960 viewport paths to fit within the 66dp safe zone (50% scale) and center them -->
+    <group
+        android:scaleX="0.5"
+        android:scaleY="0.5"
+        android:pivotX="480"
+        android:pivotY="480">
+        
+        <group android:translateY="960">
+            <!-- 1. Back Rotated Card (M3 Primary Brand Blue) -->
+            <path
+                android:fillColor="#006684"
+                android:pathData="M130-189 81-546q-5-32 15.5-58t52.5-31l61 435 283-40h267q-8 21-24.5 35.5T695-187l-477 66q-33 5-58-15t-30-53Z" />
+                
+            <!-- 2. Front Card Base (M3 Light Primary Container Blue) -->
+            <path
+                android:fillColor="#BCE9FF"
+                android:pathData="M320-316q-33 0-56.5-23.5T240-396v-364q0-33 23.5-56.5T320-840h480q33 0 56.5 23.5T880-760v364q0 33-23.5 56.5T800-316H320Z" />
+                
+            <!-- 3. Front Card Text Lines (M3 On-Primary-Container Dark Blue) -->
+            <path
+                android:fillColor="#001F2A"
+                android:pathData="M400-600h320v-80H400v80Zm0 120h200v-80H400v80Z" />
+        </group>
+    </group>
+</vector>

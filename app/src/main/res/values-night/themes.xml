@@ -1,0 +1,13 @@
+<resources>
+    <!-- Base application theme for night mode. -->
+    <style name="Theme.OfficePDF" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Customize theme here if needed, but Compose will manage the design system -->
+    </style>
+
+    <!-- Splash Screen Starting Theme -->
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#0F1319</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.OfficePDF</item>
+    </style>
+</resources>
