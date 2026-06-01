@@ -5,8 +5,8 @@
   "type": "module",
   "homepage": "https://mohindar7.github.io/OFFICEpdf/", 
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "gradlew :app:wasmJsBrowserDevelopmentRun",
+    "build": "gradlew :app:wasmJsBrowserDistribution && node copy-dist.cjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "predeploy": "npm run build", 

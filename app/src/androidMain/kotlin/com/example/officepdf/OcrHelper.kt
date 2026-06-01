@@ -1,28 +1,22 @@
 package com.example.officepdf
 
-import android.graphics.Bitmap
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 
-object OcrHelper {
+actual object OcrHelper {
 
     /**
-     * Converts a Bitmap to a Base64 encoded PNG string and requests
+     * Converts raw PNG/JPEG image bytes to a Base64 encoded string and requests
      * text extraction from the Gemini API model.
      */
-    suspend fun performOcr(bitmap: Bitmap, apiKey: String): Result<String> = withContext(Dispatchers.IO) {
+    actual suspend fun performOcr(imageBytes: ByteArray, apiKey: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            // Compress bitmap to PNG bytes
-            val outputStream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-            val bytes = outputStream.toByteArray()
-            val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            val base64Data = Base64.encodeToString(imageBytes, Base64.NO_WRAP)
 
             // Construct Gemini endpoint
             val apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey"

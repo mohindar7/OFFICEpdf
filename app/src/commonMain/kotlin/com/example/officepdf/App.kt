@@ -1,21 +1,5 @@
 package com.example.officepdf
 
-import android.content.Context
-import android.content.Intent
-import androidx.core.content.FileProvider
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.os.Bundle
-import android.os.Environment
-import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.enableEdgeToEdge
-import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -48,11 +32,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import kotlin.math.*
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -60,23 +43,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.runtime.mutableStateMapOf
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.InputStream
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.ui.res.painterResource
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.animation.animateColorAsState
@@ -87,30 +65,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.DpOffset
-
-class MainActivity : ComponentActivity() {
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
-        enableEdgeToEdge()
-        super.onCreate(savedInstanceState)
-        
-        // Load Gemini API Key
-        val sharedPrefs = getSharedPreferences("OfficePrefs", Context.MODE_PRIVATE)
-        val savedApiKey = sharedPrefs.getString("gemini_api_key", "") ?: ""
-
-        setContent {
-            OfficePdfTheme {
-                MainAppScreen(
-                    initialApiKey = savedApiKey,
-                    onSaveApiKey = { newKey ->
-                        sharedPrefs.edit().putString("gemini_api_key", newKey).apply()
-                    }
-                )
-            }
-        }
-    }
-}
 
 enum class ToolCategory {
     EDIT_SIGN, CONVERT_OCR, ORGANIZE, SECURITY, ANALYZE
@@ -142,16 +96,25 @@ data class RecentFile(
     val size: Long
 )
 
+interface ToastMessenger {
+    fun showToast(message: String)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainAppScreen(
-    initialApiKey: String,
-    onSaveApiKey: (String) -> Unit
+    settingsStorage: SettingsStorage,
+    pdfEngine: PdfEngine,
+    fileOperations: FileOperations,
+    filePicker: FilePicker,
+    toastMessenger: ToastMessenger = object : ToastMessenger {
+        override fun showToast(message: String) {}
+    }
 ) {
-    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var activeTool by remember { mutableStateOf<Tool?>(null) }
-    var geminiApiKey by remember { mutableStateOf(initialApiKey) }
+    var geminiApiKey by remember { mutableStateOf(settingsStorage.getString("gemini_api_key", "")) }
+
     var showSettingsDialog by remember { mutableStateOf(false) }
     var topBarActionLabel by remember { mutableStateOf<String?>(null) }
     var topBarActionEnabled by remember { mutableStateOf(true) }
@@ -160,7 +123,7 @@ fun MainAppScreen(
     var toolsSubTab by remember { mutableStateOf("combine_split") } // combine_split, convert_ocr
 
     // Shared preloading states for clicking files
-    var pendingFilesToLoad by remember { mutableStateOf<List<File>>(listOf()) }
+    var pendingFilesToLoad by remember { mutableStateOf<List<PlatformFile>>(listOf()) }
     var targetToolForHomePicker by remember { mutableStateOf<Tool?>(null) }
     var homeConvertOcrMode by remember { mutableStateOf("img_to_pdf") }
     var homeCombineSplitMode by remember { mutableStateOf("combine") }
@@ -168,55 +131,12 @@ fun MainAppScreen(
     var showCombineSplitSheet by remember { mutableStateOf(false) }
     var showConverterSheet by remember { mutableStateOf(false) }
 
-    val docPickerHome = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments(),
-        onResult = { uris ->
-            if (uris.isNotEmpty()) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    val files = uris.mapNotNull { uri ->
-                        PdfRendererHelper.copyUriToTempFile(context, uri, "input_${System.currentTimeMillis()}.pdf")
-                    }
-                    if (files.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            pendingFilesToLoad = files
-                            activeTool = targetToolForHomePicker
-                        }
-                    }
-                }
-            }
-        }
-    )
-
-    val imagePickerHome = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents(),
-        onResult = { uris ->
-            if (uris.isNotEmpty()) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    val files = uris.mapNotNull { uri ->
-                        val inputStream = context.contentResolver.openInputStream(uri)
-                        val temp = File(context.cacheDir, "img_${System.currentTimeMillis()}.jpg")
-                        FileOutputStream(temp).use { outputStream ->
-                            inputStream?.copyTo(outputStream)
-                        }
-                        temp
-                    }
-                    if (files.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
-                            pendingFilesToLoad = files
-                            activeTool = targetToolForHomePicker
-                        }
-                    }
-                }
-            }
-        }
-    )
-
     if (activeTool != null) {
-        BackHandler {
+        PlatformBackHandler {
             activeTool = null
         }
     } else if (currentTab != AppTab.HOME) {
-        BackHandler {
+        PlatformBackHandler {
             currentTab = AppTab.HOME
         }
     }
@@ -247,10 +167,10 @@ fun MainAppScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
-                            painter = painterResource(id = R.drawable.ic_app_logo),
+                            imageVector = Icons.Rounded.Description,
                             contentDescription = null,
                             modifier = Modifier.size(32.dp),
-                            tint = Color.Unspecified
+                            tint = MaterialTheme.colorScheme.primary
                         )
                         Text(
                             text = "office pdf",
@@ -349,8 +269,13 @@ fun MainAppScreen(
                             onToolClick = { clickedTool ->
                                 targetToolForHomePicker = clickedTool
                                 when (clickedTool.type) {
-                                    ToolType.EDIT -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
+                                    ToolType.EDIT, ToolType.SECURITY, ToolType.COMPARE -> {
+                                        filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                            if (files.isNotEmpty()) {
+                                                pendingFilesToLoad = files
+                                                activeTool = clickedTool
+                                            }
+                                        }
                                     }
                                     ToolType.COMBINE_SPLIT -> {
                                         showCombineSplitSheet = true
@@ -358,49 +283,48 @@ fun MainAppScreen(
                                     ToolType.CONVERT_OCR -> {
                                         showConverterSheet = true
                                     }
-                                    ToolType.SECURITY -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
-                                    }
-                                    ToolType.COMPARE -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
-                                    }
                                 }
                             },
                             onRecentFileClick = { recent ->
                                 val foundTool = tools.firstOrNull { it.name.equals(recent.operation, ignoreCase = true) } ?: tools[0]
-                                pendingFilesToLoad = listOf(File(recent.path))
+                                pendingFilesToLoad = listOf(createPlatformFile(recent.path))
                                 if (foundTool.type == ToolType.COMBINE_SPLIT) {
                                     toolsSubTab = "combine_split"
                                 } else if (foundTool.type == ToolType.CONVERT_OCR) {
                                     toolsSubTab = "convert_ocr"
                                 }
                                 activeTool = foundTool
-                            }
+                            },
+                            fileOperations = fileOperations,
+                            settingsStorage = settingsStorage
                         )
                     } else {
-                        RecentFilesTab(onReRunTool = { toolName ->
-                            val found = tools.firstOrNull { it.name.equals(toolName, ignoreCase = true) }
-                            if (found != null) {
-                                targetToolForHomePicker = found
-                                when (found.type) {
-                                    ToolType.EDIT -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
-                                    }
-                                    ToolType.COMBINE_SPLIT -> {
-                                        showCombineSplitSheet = true
-                                    }
-                                    ToolType.CONVERT_OCR -> {
-                                        showConverterSheet = true
-                                    }
-                                    ToolType.SECURITY -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
-                                    }
-                                    ToolType.COMPARE -> {
-                                        docPickerHome.launch(arrayOf("application/pdf"))
+                        RecentFilesTab(
+                            onReRunTool = { toolName ->
+                                val found = tools.firstOrNull { it.name.equals(toolName, ignoreCase = true) }
+                                if (found != null) {
+                                    targetToolForHomePicker = found
+                                    when (found.type) {
+                                        ToolType.EDIT, ToolType.SECURITY, ToolType.COMPARE -> {
+                                            filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                                if (files.isNotEmpty()) {
+                                                    pendingFilesToLoad = files
+                                                    activeTool = found
+                                                }
+                                            }
+                                        }
+                                        ToolType.COMBINE_SPLIT -> {
+                                            showCombineSplitSheet = true
+                                        }
+                                        ToolType.CONVERT_OCR -> {
+                                            showConverterSheet = true
+                                        }
                                     }
                                 }
-                            }
-                        })
+                            },
+                            fileOperations = fileOperations,
+                            settingsStorage = settingsStorage
+                        )
                     }
                 } else {
                     val initialFiles = remember(pendingFilesToLoad) {
@@ -431,7 +355,11 @@ fun MainAppScreen(
                             key(tool.type.name) {
                                 ToolWorkspace(
                                     tool = tool,
-                                    geminiApiKey = geminiApiKey,
+                                    settingsStorage = settingsStorage,
+                                    pdfEngine = pdfEngine,
+                                    fileOperations = fileOperations,
+                                    filePicker = filePicker,
+                                    toastMessenger = toastMessenger,
                                     initialFiles = initialFiles,
                                     initialConvertOcrMode = homeConvertOcrMode,
                                     initialCombineSplitMode = homeCombineSplitMode,
@@ -450,7 +378,11 @@ fun MainAppScreen(
                     } else {
                         ToolWorkspace(
                             tool = tool,
-                            geminiApiKey = geminiApiKey,
+                            settingsStorage = settingsStorage,
+                            pdfEngine = pdfEngine,
+                            fileOperations = fileOperations,
+                            filePicker = filePicker,
+                            toastMessenger = toastMessenger,
                             initialFiles = initialFiles,
                             initialConvertOcrMode = homeConvertOcrMode,
                             initialCombineSplitMode = homeCombineSplitMode,
@@ -507,7 +439,12 @@ fun MainAppScreen(
                                     showCombineSplitSheet = false
                                     homeCombineSplitMode = "combine"
                                     toolsSubTab = "combine_split"
-                                    docPickerHome.launch(arrayOf("application/pdf"))
+                                    filePicker.pickFiles(listOf("pdf"), true) { files ->
+                                        if (files.isNotEmpty()) {
+                                            pendingFilesToLoad = files
+                                            activeTool = targetToolForHomePicker
+                                        }
+                                    }
                                 },
                             shape = RoundedCornerShape(24.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -540,7 +477,12 @@ fun MainAppScreen(
                                     showCombineSplitSheet = false
                                     homeCombineSplitMode = "split"
                                     toolsSubTab = "combine_split"
-                                    docPickerHome.launch(arrayOf("application/pdf"))
+                                    filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                        if (files.isNotEmpty()) {
+                                            pendingFilesToLoad = files
+                                            activeTool = targetToolForHomePicker
+                                        }
+                                    }
                                 },
                             shape = RoundedCornerShape(24.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -607,7 +549,12 @@ fun MainAppScreen(
                                     showConverterSheet = false
                                     homeConvertOcrMode = "img_to_pdf"
                                     toolsSubTab = "convert_ocr"
-                                    imagePickerHome.launch("image/*")
+                                    filePicker.pickFiles(listOf("jpg", "jpeg", "png"), true) { files ->
+                                        if (files.isNotEmpty()) {
+                                            pendingFilesToLoad = files
+                                            activeTool = targetToolForHomePicker
+                                        }
+                                    }
                                 },
                             shape = RoundedCornerShape(24.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -640,7 +587,12 @@ fun MainAppScreen(
                                     showConverterSheet = false
                                     homeConvertOcrMode = "pdf_to_img"
                                     toolsSubTab = "convert_ocr"
-                                    docPickerHome.launch(arrayOf("application/pdf"))
+                                    filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                        if (files.isNotEmpty()) {
+                                            pendingFilesToLoad = files
+                                            activeTool = targetToolForHomePicker
+                                        }
+                                    }
                                 },
                             shape = RoundedCornerShape(24.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -673,7 +625,12 @@ fun MainAppScreen(
                                     showConverterSheet = false
                                     homeConvertOcrMode = "ocr"
                                     toolsSubTab = "convert_ocr"
-                                    docPickerHome.launch(arrayOf("application/pdf"))
+                                    filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                        if (files.isNotEmpty()) {
+                                            pendingFilesToLoad = files
+                                            activeTool = targetToolForHomePicker
+                                        }
+                                    }
                                 },
                             shape = RoundedCornerShape(24.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
@@ -707,7 +664,7 @@ fun MainAppScreen(
                     onDismiss = { showSettingsDialog = false },
                     onSave = {
                         geminiApiKey = it
-                        onSaveApiKey(it)
+                        settingsStorage.putString("gemini_api_key", it)
                         showSettingsDialog = false
                     }
                 )
@@ -860,14 +817,17 @@ fun DashboardGrid(
 @Composable
 fun ToolWorkspace(
     tool: Tool,
-    geminiApiKey: String,
-    initialFiles: List<File> = listOf(),
+    settingsStorage: SettingsStorage,
+    pdfEngine: PdfEngine,
+    fileOperations: FileOperations,
+    filePicker: FilePicker,
+    toastMessenger: ToastMessenger,
+    initialFiles: List<PlatformFile> = listOf(),
     initialConvertOcrMode: String = "img_to_pdf",
     initialCombineSplitMode: String = "combine",
     onRegisterEditExecute: (String, Boolean, () -> Unit) -> Unit = { _, _, _ -> },
     onUnregisterEditExecute: () -> Unit = {}
 ) {
-    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var logs by remember { mutableStateOf<List<Pair<String, LogType>>>(listOf()) }
 
@@ -876,12 +836,12 @@ fun ToolWorkspace(
     }
     
     // Pickers states
-    var selectedFiles by remember { mutableStateOf<List<File>>(listOf()) }
-    var resultFile by remember { mutableStateOf<File?>(null) }
+    var selectedFiles by remember { mutableStateOf<List<PlatformFile>>(listOf()) }
+    var resultFile by remember { mutableStateOf<PlatformFile?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
 
     // Page overlays (text, image, signature)
-    var pageOverlays by remember { mutableStateOf<List<PdfOperations.PageOverlay>>(listOf()) }
+    var pageOverlays by remember { mutableStateOf<List<PageOverlay>>(listOf()) }
     var selectedOverlayId by remember { mutableStateOf<String?>(null) }
     var zoomScale by remember { mutableStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
@@ -893,13 +853,13 @@ fun ToolWorkspace(
     
     // Page management
     var pdfPagesCount by remember { mutableStateOf(0) }
-    var pdfPagesBitmaps by remember { mutableStateOf<List<Bitmap>>(listOf()) }
+    var pdfPagesBitmaps by remember { mutableStateOf<List<androidx.compose.ui.graphics.ImageBitmap>>(listOf()) }
     var selectedPageIndices by remember { mutableStateOf<List<Int>>(listOf()) }
     var pageRotations by remember { mutableStateOf<Map<Int, Int>>(mapOf()) }
     var pageCrops by remember { mutableStateOf<Map<Int, List<Float>>>(mapOf()) }
 
     var currentPreviewPage by remember { mutableStateOf(1) } // 1-indexed page of the WORKING document
-    var previewPageBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewPageBitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
 
     // Mode selectors for multi-purpose hubs
     var combineSplitMode by remember(initialCombineSplitMode) { mutableStateOf(initialCombineSplitMode) } // combine, split
@@ -910,7 +870,7 @@ fun ToolWorkspace(
     var passwordInput by remember { mutableStateOf("") }
     var splitsInput by remember { mutableStateOf("1, 2-3") }
     var extractedOcrText by remember { mutableStateOf("") }
-    var compareDiffResult by remember { mutableStateOf<Bitmap?>(null) }
+    var compareDiffResult by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
 
     // Dialog control states
     var showOrganizeDialog by remember { mutableStateOf(false) }
@@ -928,114 +888,98 @@ fun ToolWorkspace(
         }
     }
 
-    fun insertPagesFromPdf(
-        inputFile: File,
-        insertFile: File,
-        insertIndex: Int,
-        outputFile: File
-    ) {
-        com.tom_roush.pdfbox.pdmodel.PDDocument.load(inputFile).use { mainDoc ->
-            com.tom_roush.pdfbox.pdmodel.PDDocument.load(insertFile).use { insertDoc ->
-                com.tom_roush.pdfbox.pdmodel.PDDocument().use { outputDoc ->
-                    for (i in 0 until insertIndex) {
-                        if (i < mainDoc.numberOfPages) {
-                            outputDoc.addPage(mainDoc.getPage(i))
-                        }
-                    }
-                    for (i in 0 until insertDoc.numberOfPages) {
-                        outputDoc.addPage(insertDoc.getPage(i))
-                    }
-                    for (i in insertIndex until mainDoc.numberOfPages) {
-                        outputDoc.addPage(mainDoc.getPage(i))
-                    }
-                    outputDoc.save(outputFile)
-                }
-            }
+    suspend fun insertPagesFromPdf(
+        inputFile: PlatformFile,
+        insertFile: PlatformFile,
+        insertIndex: Int
+    ): ByteArray {
+        val total = pdfPagesCount
+        if (insertIndex <= 0) {
+            return pdfEngine.mergePdfs(listOf(insertFile, inputFile))
+        } else if (insertIndex >= total) {
+            return pdfEngine.mergePdfs(listOf(inputFile, insertFile))
+        } else {
+            val part1Bytes = pdfEngine.splitPdf(inputFile, "1-$insertIndex")
+            val part2Bytes = pdfEngine.splitPdf(inputFile, "${insertIndex + 1}-$total")
+            
+            val f1 = InMemoryPlatformFile("part1.pdf", part1Bytes.size.toLong(), "part1.pdf", part1Bytes)
+            val f2 = InMemoryPlatformFile("part2.pdf", part2Bytes.size.toLong(), "part2.pdf", part2Bytes)
+            
+            return pdfEngine.mergePdfs(listOf(f1, insertFile, f2))
         }
     }
 
-    val insertPdfPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-        onResult = { uri ->
-            if (uri != null && selectedFiles.isNotEmpty()) {
-                isProcessing = true
-                coroutineScope.launch(Dispatchers.IO) {
-                    try {
-                        val insertFile = PdfRendererHelper.copyUriToTempFile(context, uri, "insert_${System.currentTimeMillis()}.pdf")
-                        if (insertFile != null) {
-                            val insertedCount = PdfRendererHelper.getPageCount(insertFile)
-                            val mainFile = selectedFiles[0]
-                            val outDir = context.cacheDir
-                            val outFile = File(outDir, "merged_workspace_${System.currentTimeMillis()}.pdf")
-                            
-                            // 1. Physically insert pages
-                            insertPagesFromPdf(mainFile, insertFile, targetInsertPosition, outFile)
-                            
-                            // 2. Load the new file and render its thumbnails
-                            val count = PdfRendererHelper.getPageCount(outFile)
-                            val list = mutableListOf<Bitmap>()
-                            for (i in 0 until count) {
-                                PdfRendererHelper.renderPageToBitmap(context, outFile, i, 0.4f)?.let { list.add(it) }
-                            }
-                            val firstPageBmp = PdfRendererHelper.renderPageToBitmap(context, outFile, 0, 1.5f)
-                            
-                            withContext(Dispatchers.Main) {
-                                // 3. Shift state maps
-                                val newRotations = mutableMapOf<Int, Int>()
-                                pageRotations.forEach { entry ->
-                                    val k = entry.key
-                                    val v = entry.value
-                                    if (k >= targetInsertPosition) {
-                                        newRotations[k + insertedCount] = v
-                                    } else {
-                                        newRotations[k] = v
-                                    }
-                                }
-                                pageRotations = newRotations
-
-                                val newCrops = mutableMapOf<Int, List<Float>>()
-                                pageCrops.forEach { entry ->
-                                    val k = entry.key
-                                    val v = entry.value
-                                    if (k >= targetInsertPosition) {
-                                        newCrops[k + insertedCount] = v
-                                    } else {
-                                        newCrops[k] = v
-                                    }
-                                }
-                                pageCrops = newCrops
-
-                                pageOverlays = pageOverlays.map {
-                                    if (it.pageNumber > targetInsertPosition) {
-                                        it.copy(pageNumber = it.pageNumber + insertedCount)
-                                    } else {
-                                        it
-                                    }
-                                }
-                                
-                                // 4. Set new files and selection
-                                selectedFiles = listOf(outFile)
-                                pdfPagesCount = count
-                                pdfPagesBitmaps = list
-                                selectedPageIndices = (0 until count).toList()
-                                previewPageBitmap = firstPageBmp
-                                currentPreviewPage = currentPreviewPage.coerceIn(1, count)
-                                addLog("Inserted $insertedCount pages at position $targetInsertPosition.")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            addLog("Failed to insert PDF: ${e.message}", LogType.ERROR)
-                        }
-                    } finally {
-                        withContext(Dispatchers.Main) {
-                            isProcessing = false
-                        }
+    fun onInsertPdfPicked(insertFile: PlatformFile) {
+        if (selectedFiles.isEmpty()) return
+        isProcessing = true
+        coroutineScope.launch {
+            try {
+                addLog("Analyzing document to insert...")
+                val insertPages = pdfEngine.renderPdfPages(insertFile)
+                val insertedCount = insertPages.size
+                
+                val mainFile = selectedFiles[0]
+                addLog("Merging pages...")
+                
+                val mergedBytes = insertPagesFromPdf(mainFile, insertFile, targetInsertPosition)
+                val outFile = InMemoryPlatformFile(
+                    name = "workspace_${getCurrentTimeMillis()}.pdf",
+                    size = mergedBytes.size.toLong(),
+                    path = "workspace_${getCurrentTimeMillis()}.pdf",
+                    bytes = mergedBytes
+                )
+                
+                addLog("Rendering workspace previews...")
+                val newPagesBytes = pdfEngine.renderPdfPages(outFile)
+                val imageBitmaps = newPagesBytes.map { it.toImageBitmap() }
+                val count = imageBitmaps.size
+                
+                val newRotations = mutableMapOf<Int, Int>()
+                pageRotations.forEach { entry ->
+                    val k = entry.key
+                    val v = entry.value
+                    if (k >= targetInsertPosition) {
+                        newRotations[k + insertedCount] = v
+                    } else {
+                        newRotations[k] = v
                     }
                 }
+                pageRotations = newRotations
+
+                val newCrops = mutableMapOf<Int, List<Float>>()
+                pageCrops.forEach { entry ->
+                    val k = entry.key
+                    val v = entry.value
+                    if (k >= targetInsertPosition) {
+                        newCrops[k + insertedCount] = v
+                    } else {
+                        newCrops[k] = v
+                    }
+                }
+                pageCrops = newCrops
+
+                pageOverlays = pageOverlays.map {
+                    if (it.pageNumber > targetInsertPosition) {
+                        it.copy(pageNumber = it.pageNumber + insertedCount)
+                    } else {
+                        it
+                    }
+                }
+                
+                selectedFiles = listOf(outFile)
+                pdfPagesCount = count
+                pdfPagesBitmaps = imageBitmaps
+                selectedPageIndices = (0 until count).toList()
+                previewPageBitmap = imageBitmaps.getOrNull(0)
+                currentPreviewPage = currentPreviewPage.coerceIn(1, count)
+                addLog("Inserted $insertedCount pages at position $targetInsertPosition.", LogType.SUCCESS)
+            } catch (e: Exception) {
+                addLog("Failed to insert PDF: ${e.message}", LogType.ERROR)
+            } finally {
+                isProcessing = false
             }
         }
-    )
+    }
     
     // Drag-and-drop Signature Canvas state
     var signatureMode by remember { mutableStateOf("signature") }
@@ -1044,11 +988,11 @@ fun ToolWorkspace(
 
     // Dynamic Hud & Options Bottom Sheet states
     var hudVisible by remember { mutableStateOf(true) }
-    var lastInteractionTime by remember { mutableStateOf(System.currentTimeMillis()) }
+    var lastInteractionTime by remember { mutableStateOf(getCurrentTimeMillis()) }
     var showEditOptionsSheet by remember { mutableStateOf(false) }
 
     val notifyInteraction = {
-        lastInteractionTime = System.currentTimeMillis()
+        lastInteractionTime = getCurrentTimeMillis()
         hudVisible = true
     }
 
@@ -1084,219 +1028,116 @@ fun ToolWorkspace(
         hasPageNumbers = false
     }
 
-    // Preload initial files if supplied (must be defined after addLog and properties are declared)
-    LaunchedEffect(initialFiles) {
-        if (initialFiles.isNotEmpty()) {
-            selectedFiles = initialFiles
-            addLog("Loaded ${initialFiles.size} document(s) successfully.")
-            if (tool.type == ToolType.EDIT) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    try {
-                        val count = PdfRendererHelper.getPageCount(initialFiles[0])
-                        pdfPagesCount = count
-                        val list = mutableListOf<Bitmap>()
-                        for (i in 0 until count) {
-                            PdfRendererHelper.renderPageToBitmap(context, initialFiles[0], i, 0.4f)?.let { list.add(it) }
-                        }
-                        val firstPageBmp = PdfRendererHelper.renderPageToBitmap(context, initialFiles[0], 0, 1.5f)
-                        withContext(Dispatchers.Main) {
-                            pdfPagesBitmaps = list
-                            selectedPageIndices = (0 until count).toList()
-                            previewPageBitmap = firstPageBmp
-                            currentPreviewPage = 1
-                            addLog("PDF Workspace loaded. $count pages ready for editing.")
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            addLog("Error loading PDF: ${e.message}", LogType.ERROR)
-                        }
-                    }
-                }
+
+
+    fun loadPdfWorkspace(file: PlatformFile) {
+        addLog("Loading PDF workspace...")
+        coroutineScope.launch {
+            try {
+                val pagesBytes = pdfEngine.renderPdfPages(file)
+                val imageBitmaps = pagesBytes.map { it.toImageBitmap() }
+                val count = imageBitmaps.size
+                
+                pdfPagesCount = count
+                pdfPagesBitmaps = imageBitmaps
+                selectedPageIndices = (0 until count).toList()
+                previewPageBitmap = imageBitmaps.getOrNull(0)
+                currentPreviewPage = 1
+                addLog("PDF Workspace loaded. $count pages ready for editing.")
+            } catch (e: Exception) {
+                addLog("Error loading PDF: ${e.message}", LogType.ERROR)
             }
-            if (tool.type == ToolType.SECURITY) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    var isLocked = false
-                    try {
-                        com.tom_roush.pdfbox.pdmodel.PDDocument.load(initialFiles[0]).use { _ -> }
-                    } catch (e: Exception) {
-                        isLocked = true
-                    }
-                    withContext(Dispatchers.Main) {
-                        securityIsLocked = isLocked
-                        if (isLocked) {
-                            addLog("Document is protected. Enter password to unlock.", LogType.INFO)
-                        } else {
-                            addLog("Document is unprotected. Enter password to lock.", LogType.INFO)
-                        }
-                    }
+        }
+    }
+
+    fun handlePickedDocuments(files: List<PlatformFile>) {
+        if (files.isEmpty()) return
+        selectedFiles = files
+        addLog("Loaded ${files.size} document(s) successfully.")
+
+        if (tool.type == ToolType.EDIT) {
+            loadPdfWorkspace(files[0])
+        }
+
+        if (tool.type == ToolType.SECURITY) {
+            coroutineScope.launch {
+                val isLocked = pdfEngine.isProtected(files[0])
+                securityIsLocked = isLocked
+                if (isLocked) {
+                    addLog("Document is protected. Enter password to unlock.", LogType.INFO)
+                } else {
+                    addLog("Document is unprotected. Enter password to lock.", LogType.INFO)
                 }
             }
         }
     }
 
-    // Launch pickers
-    val docPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments(),
-        onResult = { uris ->
-            if (uris.isNotEmpty()) {
-                addLog("Processing selected file(s)...")
-                val files = uris.mapNotNull { uri ->
-                    val temp = PdfRendererHelper.copyUriToTempFile(context, uri, "input_${System.currentTimeMillis()}.pdf")
-                    if (temp == null) {
-                        addLog("Error copying PDF file.", LogType.ERROR)
-                    }
-                    temp
-                }
-                selectedFiles = files
-                addLog("Loaded ${files.size} document(s) successfully.")
+    fun handlePickedImages(files: List<PlatformFile>) {
+        if (files.isEmpty()) return
+        selectedFiles = files
+        addLog("Loaded ${files.size} image(s) successfully.")
+    }
 
-                if (tool.type == ToolType.EDIT && files.isNotEmpty()) {
-                    coroutineScope.launch(Dispatchers.IO) {
-                        try {
-                            val count = PdfRendererHelper.getPageCount(files[0])
-                            pdfPagesCount = count
-                            val list = mutableListOf<Bitmap>()
-                            for (i in 0 until count) {
-                                PdfRendererHelper.renderPageToBitmap(context, files[0], i, 0.4f)?.let { list.add(it) }
-                            }
-                            val firstPageBmp = PdfRendererHelper.renderPageToBitmap(context, files[0], 0, 1.5f)
-                            withContext(Dispatchers.Main) {
-                                pdfPagesBitmaps = list
-                                selectedPageIndices = (0 until count).toList()
-                                previewPageBitmap = firstPageBmp
-                                currentPreviewPage = 1
-                                addLog("PDF Workspace loaded. $count pages ready for editing.")
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                addLog("Error loading PDF: ${e.message}", LogType.ERROR)
-                            }
-                        }
-                    }
-                }
-
-                if (tool.type == ToolType.SECURITY && files.isNotEmpty()) {
-                    // Check if document is password-protected
-                    coroutineScope.launch(Dispatchers.IO) {
-                        var isLocked = false
-                        try {
-                            com.tom_roush.pdfbox.pdmodel.PDDocument.load(files[0]).use { _ -> }
-                        } catch (e: Exception) {
-                            isLocked = true
-                        }
-                        withContext(Dispatchers.Main) {
-                            securityIsLocked = isLocked
-                            if (isLocked) {
-                                addLog("Document is protected. Enter password to unlock.", LogType.INFO)
-                            } else {
-                                addLog("Document is unprotected. Enter password to lock.", LogType.INFO)
-                            }
-                        }
-                    }
-                }
+    fun handlePickedOverlayImage(file: PlatformFile) {
+        coroutineScope.launch {
+            try {
+                val bytes = file.readBytes()
+                val newOverlay = PageOverlay(
+                    id = "overlay_${getCurrentTimeMillis()}",
+                    type = "image",
+                    imageBytes = bytes,
+                    xFraction = 0.1f,
+                    yFraction = 0.1f,
+                    widthFraction = 0.3f,
+                    heightFraction = 0.2f,
+                    pageNumber = currentPreviewPage
+                )
+                pageOverlays = pageOverlays + newOverlay
+                selectedOverlayId = newOverlay.id
+                addLog("Imported custom overlay image.")
+            } catch (e: Exception) {
+                toastMessenger.showToast("Failed to load overlay image")
             }
         }
-    )
+    }
 
-    val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents(),
-        onResult = { uris ->
-            if (uris.isNotEmpty()) {
-                addLog("Processing selected image(s)...")
-                val files = uris.mapNotNull { uri ->
-                    val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-                    val temp = File(context.cacheDir, "img_${System.currentTimeMillis()}.jpg")
-                    FileOutputStream(temp).use { outputStream ->
-                        inputStream?.copyTo(outputStream)
-                    }
-                    temp
+    fun handleReplaceOverlayImage(file: PlatformFile) {
+        val targetId = selectedOverlayId ?: return
+        coroutineScope.launch {
+            try {
+                val bytes = file.readBytes()
+                pageOverlays = pageOverlays.map {
+                    if (it.id == targetId) {
+                        it.copy(imageBytes = bytes)
+                    } else it
                 }
-                selectedFiles = files
-                addLog("Loaded ${files.size} image(s) successfully.")
+                addLog("Replaced overlay image.")
+            } catch (e: Exception) {
+                toastMessenger.showToast("Failed to replace image")
             }
         }
-    )
+    }
 
-    val overlayImagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
-        onResult = { uri ->
-            if (uri != null) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    try {
-                        val tempFile = File(context.cacheDir, "overlay_img_${System.currentTimeMillis()}.jpg")
-                        context.contentResolver.openInputStream(uri).use { input ->
-                            FileOutputStream(tempFile).use { outputStream ->
-                                input?.copyTo(outputStream)
-                            }
-                        }
-                        withContext(Dispatchers.Main) {
-                            val newOverlay = PdfOperations.PageOverlay(
-                                type = "image",
-                                imagePath = tempFile.absolutePath,
-                                xFraction = 0.1f,
-                                yFraction = 0.1f,
-                                widthFraction = 0.3f,
-                                heightFraction = 0.2f,
-                                pageNumber = currentPreviewPage
-                            )
-                            pageOverlays = pageOverlays + newOverlay
-                            selectedOverlayId = newOverlay.id
-                            addLog("Imported custom overlay image.")
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Failed to load overlay image", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            }
+    // Preload initial files if supplied (must be defined after helper functions are declared)
+    LaunchedEffect(initialFiles) {
+        if (initialFiles.isNotEmpty()) {
+            handlePickedDocuments(initialFiles)
         }
-    )
+    }
 
-    val replaceOverlayImagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
-        onResult = { uri ->
-            if (uri != null && selectedOverlayId != null) {
-                coroutineScope.launch(Dispatchers.IO) {
-                    try {
-                        val tempFile = File(context.cacheDir, "overlay_img_${System.currentTimeMillis()}.jpg")
-                        context.contentResolver.openInputStream(uri).use { input ->
-                            FileOutputStream(tempFile).use { outputStream ->
-                                input?.copyTo(outputStream)
-                            }
-                        }
-                        withContext(Dispatchers.Main) {
-                            pageOverlays = pageOverlays.map {
-                                if (it.id == selectedOverlayId) {
-                                    it.copy(imagePath = tempFile.absolutePath)
-                                } else it
-                            }
-                            addLog("Replaced overlay image.")
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Failed to replace image", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
+    fun saveToDownloads(file: PlatformFile, finalName: String) {
+        coroutineScope.launch {
+            try {
+                val bytes = file.readBytes()
+                val mimeType = if (finalName.endsWith(".jpg", ignoreCase = true) || finalName.endsWith(".jpeg", ignoreCase = true)) "image/jpeg"
+                               else if (finalName.endsWith(".png", ignoreCase = true)) "image/png"
+                               else "application/pdf"
+                fileOperations.saveFile(finalName, bytes, mimeType)
+                addLog("Saved successfully: $finalName", LogType.SUCCESS)
+                RecentFilesManager.saveRecentFile(settingsStorage, file.path, finalName, tool.name, bytes.size.toLong())
+            } catch (e: Exception) {
+                addLog("Failed to export: ${e.message}", LogType.ERROR)
             }
-        }
-    )
-
-    fun saveToDownloads(file: File, finalName: String) {
-        try {
-            val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val destFile = File(downloadDir, finalName)
-            FileInputStream(file).use { input ->
-                FileOutputStream(destFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            addLog("Saved to Downloads: $finalName", LogType.SUCCESS)
-            Toast.makeText(context, "Exported successfully!", Toast.LENGTH_LONG).show()
-            RecentFilesManager.saveRecentFile(context, destFile.absolutePath, tool.name)
-        } catch (e: Exception) {
-            addLog("Failed to export: ${e.message}", LogType.ERROR)
         }
     }
 
@@ -1331,7 +1172,7 @@ fun ToolWorkspace(
             var editingTextId by remember { mutableStateOf<String?>(null) }
             var editingTextValue by remember { mutableStateOf("") }
             var showContextOptionsDialog by remember { mutableStateOf(false) }
-            var contextTargetOverlay by remember { mutableStateOf<PdfOperations.PageOverlay?>(null) }
+            var contextTargetOverlay by remember { mutableStateOf<PageOverlay?>(null) }
 
             if (showTextEditDialog) {
                 AlertDialog(
@@ -1450,8 +1291,8 @@ fun ToolWorkspace(
                                     Box(
                                         modifier = Modifier
                                             .size(
-                                                width = (canvasWidth / context.resources.displayMetrics.density).dp,
-                                                height = (canvasHeight / context.resources.displayMetrics.density).dp
+                                                width = (canvasWidth / LocalDensity.current.density).dp,
+                                                height = (canvasHeight / LocalDensity.current.density).dp
                                             )
                                             .shadow(
                                                 elevation = if (isActive) 12.dp else 4.dp,
@@ -1469,12 +1310,7 @@ fun ToolWorkspace(
                                                     if (currentPreviewPage != pageIdx + 1) {
                                                         currentPreviewPage = pageIdx + 1
                                                         notifyInteraction()
-                                                        coroutineScope.launch(Dispatchers.IO) {
-                                                            val pageBmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], selectedPageIndices[currentPreviewPage - 1], 1.5f)
-                                                            withContext(Dispatchers.Main) {
-                                                                previewPageBitmap = pageBmp
-                                                            }
-                                                        }
+                                                        previewPageBitmap = pdfPagesBitmaps.getOrNull(selectedPageIndices[currentPreviewPage - 1])
                                                     }
                                                 }
                                             ),
@@ -1483,7 +1319,7 @@ fun ToolWorkspace(
                                         val displayBmp = if (isActive) (previewPageBitmap ?: pdfPagesBitmaps.getOrNull(pageIdx)) else pdfPagesBitmaps.getOrNull(pageIdx)
                                         if (displayBmp != null) {
                                             Image(
-                                                bitmap = displayBmp.asImageBitmap(),
+                                                bitmap = displayBmp,
                                                 contentDescription = null,
                                                 modifier = Modifier.fillMaxSize(),
                                                 contentScale = ContentScale.Fit
@@ -1508,8 +1344,8 @@ fun ToolWorkspace(
                                                 modifier = Modifier
                                                     .offset { IntOffset(visualX.roundToInt(), visualY.roundToInt()) }
                                                     .size(
-                                                        width = (visualWidth / context.resources.displayMetrics.density).dp,
-                                                        height = (visualHeight / context.resources.displayMetrics.density).dp
+                                                        width = (visualWidth / LocalDensity.current.density).dp,
+                                                        height = (visualHeight / LocalDensity.current.density).dp
                                                     )
                                                     .graphicsLayer {
                                                         rotationZ = overlay.rotation
@@ -1545,12 +1381,12 @@ fun ToolWorkspace(
                                                                 val zScale = currentZoomScaleState.value
                                                                 
                                                                 val currentOverlay = list.firstOrNull { it.id == overlay.id } ?: overlay
-                                                                val rad = Math.toRadians(currentOverlay.rotation.toDouble())
-                                                                val cos = Math.cos(rad)
-                                                                val sin = Math.sin(rad)
+                                                                val rad = currentOverlay.rotation.toDouble() * PI / 180.0
+                                                                val cos = cos(rad).toFloat()
+                                                                val sin = sin(rad).toFloat()
                                                                 
-                                                                val dragXParent = ((dragAmount.x * cos - dragAmount.y * sin) / zScale).toFloat()
-                                                                val dragYParent = ((dragAmount.x * sin + dragAmount.y * cos) / zScale).toFloat()
+                                                                val dragXParent = (dragAmount.x * cos - dragAmount.y * sin) / zScale
+                                                                val dragYParent = (dragAmount.x * sin + dragAmount.y * cos) / zScale
                                                                 
                                                                 accumulatedParentDragX += dragXParent
                                                                 accumulatedParentDragY += dragYParent
@@ -1603,17 +1439,15 @@ fun ToolWorkspace(
                                                         modifier = Modifier.padding(4.dp)
                                                     )
                                                 } else if (overlay.type == "image") {
-                                                    val oImgFile = File(overlay.imagePath)
-                                                    if (oImgFile.exists()) {
-                                                        val oBmp = BitmapFactory.decodeFile(oImgFile.absolutePath)
-                                                        if (oBmp != null) {
-                                                            Image(
-                                                                bitmap = oBmp.asImageBitmap(),
-                                                                contentDescription = null,
-                                                                modifier = Modifier.fillMaxSize(),
-                                                                contentScale = ContentScale.FillBounds
-                                                            )
-                                                        }
+                                                    val bytes = overlay.imageBytes
+                                                    if (bytes != null) {
+                                                        val oBmp = remember(bytes) { bytes.toImageBitmap() }
+                                                        Image(
+                                                            bitmap = oBmp,
+                                                            contentDescription = null,
+                                                            modifier = Modifier.fillMaxSize(),
+                                                            contentScale = ContentScale.FillBounds
+                                                        )
                                                     }
                                                 }
 
@@ -1648,12 +1482,12 @@ fun ToolWorkspace(
                                                                         val zScale = currentZoomScaleState.value
                                                                         
                                                                         val currentOverlay = list.firstOrNull { it.id == overlay.id } ?: overlay
-                                                                        val rad = Math.toRadians(currentOverlay.rotation.toDouble())
-                                                                        val cos = Math.cos(rad)
-                                                                        val sin = Math.sin(rad)
+                                                                        val rad = currentOverlay.rotation.toDouble() * PI / 180.0
+                                                                        val cos = cos(rad).toFloat()
+                                                                        val sin = sin(rad).toFloat()
                                                                         
-                                                                        val dragXParent = ((dragAmount.x * cos - dragAmount.y * sin) / zScale).toFloat()
-                                                                        val dragYParent = ((dragAmount.x * sin + dragAmount.y * cos) / zScale).toFloat()
+                                                                        val dragXParent = (dragAmount.x * cos - dragAmount.y * sin) / zScale
+                                                                        val dragYParent = (dragAmount.x * sin + dragAmount.y * cos) / zScale
                                                                         
                                                                         accumulatedParentDragX += dragXParent
                                                                         accumulatedParentDragY += dragYParent
@@ -1710,9 +1544,9 @@ fun ToolWorkspace(
                                                                         val cx = (currentOverlay.xFraction * canvasW) + overlayW / 2f
                                                                         val cy = (currentOverlay.yFraction * canvasH) + overlayH / 2f
                                                                         
-                                                                        val rad = Math.toRadians(currentOverlay.rotation.toDouble())
-                                                                        val cos = Math.cos(rad).toFloat()
-                                                                        val sin = Math.sin(rad).toFloat()
+                                                                        val rad = currentOverlay.rotation.toDouble() * PI / 180.0
+                                                                        val cos = cos(rad).toFloat()
+                                                                        val sin = sin(rad).toFloat()
                                                                         
                                                                         val rx = (overlayW / 2f) * cos + (overlayH / 2f) * sin
                                                                         val ry = (overlayW / 2f) * sin - (overlayH / 2f) * cos
@@ -1729,12 +1563,12 @@ fun ToolWorkspace(
                                                                         val zScale = currentZoomScaleState.value
                                                                         
                                                                         val currentOverlay = list.firstOrNull { it.id == overlay.id } ?: overlay
-                                                                        val rad = Math.toRadians(currentOverlay.rotation.toDouble())
-                                                                        val cos = Math.cos(rad)
-                                                                        val sin = Math.sin(rad)
+                                                                        val rad = currentOverlay.rotation.toDouble() * PI / 180.0
+                                                                        val cos = cos(rad).toFloat()
+                                                                        val sin = sin(rad).toFloat()
                                                                         
-                                                                        val dragXParent = ((dragAmount.x * cos - dragAmount.y * sin) / zScale).toFloat()
-                                                                        val dragYParent = ((dragAmount.x * sin + dragAmount.y * cos) / zScale).toFloat()
+                                                                        val dragXParent = (dragAmount.x * cos - dragAmount.y * sin) / zScale
+                                                                        val dragYParent = (dragAmount.x * sin + dragAmount.y * cos) / zScale
                                                                         
                                                                         trackedHandleX += dragXParent
                                                                         trackedHandleY += dragYParent
@@ -1744,8 +1578,8 @@ fun ToolWorkspace(
                                                                         val cx = (currentOverlay.xFraction * canvasW) + overlayW / 2f
                                                                         val cy = (currentOverlay.yFraction * canvasH) + overlayH / 2f
                                                                         
-                                                                        val refAngle = Math.toDegrees(Math.atan2(-overlayH / 2.0, overlayW / 2.0)).toFloat()
-                                                                        val currentAngle = Math.toDegrees(Math.atan2((trackedHandleY - cy).toDouble(), (trackedHandleX - cx).toDouble())).toFloat()
+                                                                        val refAngle = (atan2(-overlayH / 2.0, overlayW / 2.0) * 180.0 / PI).toFloat()
+                                                                        val currentAngle = (atan2((trackedHandleY - cy).toDouble(), (trackedHandleX - cx).toDouble()) * 180.0 / PI).toFloat()
                                                                         
                                                                         val newRotation = (currentAngle - refAngle) % 360f
                                                                         val normalizedRotation = if (newRotation < 0) newRotation + 360f else newRotation
@@ -1805,7 +1639,11 @@ fun ToolWorkspace(
                                                                             showContextOptionsDialog = false
                                                                             if (overlay.type == "image") {
                                                                                 selectedOverlayId = overlay.id
-                                                                                replaceOverlayImagePicker.launch("image/*")
+                                                                                filePicker.pickFiles(listOf("jpg", "jpeg", "png"), false) { files ->
+                                                                                    if (files.isNotEmpty()) {
+                                                                                        handleReplaceOverlayImage(files[0])
+                                                                                    }
+                                                                                }
                                                                             } else {
                                                                                 editingTextId = overlay.id
                                                                                 editingTextValue = overlay.text
@@ -1885,20 +1723,14 @@ fun ToolWorkspace(
                                 currentPreviewPage--
                                 zoomScale = 1f
                                 panOffset = Offset.Zero
-                                coroutineScope.launch(Dispatchers.IO) {
-                                    val pageBmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], selectedPageIndices[currentPreviewPage - 1], 1.5f)
-                                    withContext(Dispatchers.Main) { previewPageBitmap = pageBmp }
-                                }
+                                previewPageBitmap = pdfPagesBitmaps.getOrNull(selectedPageIndices[currentPreviewPage - 1])
                             },
                             onNextPage = {
                                 notifyInteraction()
                                 currentPreviewPage++
                                 zoomScale = 1f
                                 panOffset = Offset.Zero
-                                coroutineScope.launch(Dispatchers.IO) {
-                                    val pageBmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], selectedPageIndices[currentPreviewPage - 1], 1.5f)
-                                    withContext(Dispatchers.Main) { previewPageBitmap = pageBmp }
-                                }
+                                previewPageBitmap = pdfPagesBitmaps.getOrNull(selectedPageIndices[currentPreviewPage - 1])
                             },
                             zoomScale = zoomScale,
                             onZoomIn = {
@@ -1994,9 +1826,13 @@ fun ToolWorkspace(
                             val pickImages = (tool.type == ToolType.CONVERT_OCR && convertOcrMode == "img_to_pdf")
                             val pickMultiple = (tool.type == ToolType.COMBINE_SPLIT && combineSplitMode == "combine")
                             if (pickImages) {
-                                imagePicker.launch("image/*")
+                                filePicker.pickFiles(listOf("jpg", "jpeg", "png"), true) { files ->
+                                    handlePickedImages(files)
+                                }
                             } else {
-                                docPicker.launch(arrayOf("application/pdf"))
+                                filePicker.pickFiles(listOf("pdf"), pickMultiple) { files ->
+                                    handlePickedDocuments(files)
+                                }
                             }
                         },
                     shape = RoundedCornerShape(24.dp),
@@ -2083,7 +1919,7 @@ fun ToolWorkspace(
                 var editingTextId by remember { mutableStateOf<String?>(null) }
                 var editingTextValue by remember { mutableStateOf("") }
                 var showContextOptionsDialog by remember { mutableStateOf(false) }
-                var contextTargetOverlay by remember { mutableStateOf<PdfOperations.PageOverlay?>(null) }
+                var contextTargetOverlay by remember { mutableStateOf<PageOverlay?>(null) }
 
                 if (showTextEditDialog) {
                     AlertDialog(
@@ -2140,7 +1976,11 @@ fun ToolWorkspace(
                                             showContextOptionsDialog = false
                                             if (overlay.type == "image") {
                                                 selectedOverlayId = overlay.id
-                                                replaceOverlayImagePicker.launch("image/*")
+                                                filePicker.pickFiles(listOf("jpg", "jpeg", "png"), false) { files ->
+                                                    if (files.isNotEmpty()) {
+                                                        handleReplaceOverlayImage(files[0])
+                                                    }
+                                                }
                                             } else {
                                                 editingTextId = overlay.id
                                                 editingTextValue = overlay.text
@@ -2267,7 +2107,7 @@ fun ToolWorkspace(
                                         }
                                 ) {
                                     Image(
-                                        bitmap = bmp.asImageBitmap(),
+                                        bitmap = bmp,
                                         contentDescription = null,
                                         modifier = Modifier.fillMaxSize()
                                     )
@@ -2283,8 +2123,8 @@ fun ToolWorkspace(
                                             modifier = Modifier
                                                 .offset { IntOffset(visualX.roundToInt(), visualY.roundToInt()) }
                                                 .size(
-                                                    width = (visualWidth / context.resources.displayMetrics.density).dp,
-                                                    height = (visualHeight / context.resources.displayMetrics.density).dp
+                                                    width = (visualWidth / LocalDensity.current.density).dp,
+                                                    height = (visualHeight / LocalDensity.current.density).dp
                                                 )
                                                 .border(
                                                     width = if (isSelected) 2.dp else 1.dp,
@@ -2348,17 +2188,15 @@ fun ToolWorkspace(
                                                     modifier = Modifier.padding(4.dp)
                                                 )
                                             } else if (overlay.type == "image") {
-                                                val oImgFile = File(overlay.imagePath)
-                                                if (oImgFile.exists()) {
-                                                    val oBmp = BitmapFactory.decodeFile(oImgFile.absolutePath)
-                                                    if (oBmp != null) {
-                                                        Image(
-                                                            bitmap = oBmp.asImageBitmap(),
-                                                            contentDescription = null,
-                                                            modifier = Modifier.fillMaxSize(),
-                                                            contentScale = ContentScale.FillBounds
-                                                        )
-                                                    }
+                                                val bytes = overlay.imageBytes
+                                                if (bytes != null) {
+                                                    val oBmp = remember(bytes) { bytes.toImageBitmap() }
+                                                    Image(
+                                                        bitmap = oBmp,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentScale = ContentScale.FillBounds
+                                                    )
                                                 }
                                             }
 
@@ -2418,20 +2256,14 @@ fun ToolWorkspace(
                                             currentPreviewPage--
                                             zoomScale = 1f
                                             panOffset = Offset.Zero
-                                            coroutineScope.launch(Dispatchers.IO) {
-                                                val pageBmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], selectedPageIndices[currentPreviewPage - 1], 1.5f)
-                                                withContext(Dispatchers.Main) { previewPageBitmap = pageBmp }
-                                            }
+                                            previewPageBitmap = pdfPagesBitmaps.getOrNull(selectedPageIndices[currentPreviewPage - 1])
                                         },
                                         onNextPage = {
                                             notifyInteraction()
                                             currentPreviewPage++
                                             zoomScale = 1f
                                             panOffset = Offset.Zero
-                                            coroutineScope.launch(Dispatchers.IO) {
-                                                val pageBmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], selectedPageIndices[currentPreviewPage - 1], 1.5f)
-                                                withContext(Dispatchers.Main) { previewPageBitmap = pageBmp }
-                                            }
+                                            previewPageBitmap = pdfPagesBitmaps.getOrNull(selectedPageIndices[currentPreviewPage - 1])
                                         },
                                         zoomScale = zoomScale,
                                         onZoomIn = {
@@ -2529,7 +2361,13 @@ fun ToolWorkspace(
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Button(
-                                        onClick = { docPicker.launch(arrayOf("application/pdf")) },
+                                        onClick = {
+                                            filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                                if (files.isNotEmpty()) {
+                                                    selectedFiles = selectedFiles.take(1) + files
+                                                }
+                                            }
+                                        },
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier.fillMaxWidth()
                                     ) { Text("Select Document B") }
@@ -2547,75 +2385,67 @@ fun ToolWorkspace(
                         Button(
                             onClick = {
                                 if (isProcessing) return@Button
-                                coroutineScope.launch(Dispatchers.IO) {
-                                    withContext(Dispatchers.Main) {
-                                        isProcessing = true
-                                        resultFile = null
-                                        addLog("Processing document...", LogType.INFO)
-                                    }
+                                coroutineScope.launch {
+                                    isProcessing = true
+                                    resultFile = null
+                                    addLog("Processing document...", LogType.INFO)
                                     try {
-                                        val outDir = context.cacheDir
-                                        val outFile = File(outDir, "out_${System.currentTimeMillis()}.${if (tool.type == ToolType.CONVERT_OCR && convertOcrMode == "pdf_to_img") "jpg" else "pdf"}")
-
+                                        var outputBytes = ByteArray(0)
+                                        var finalName = ""
+                                        var isPlainFileSave = true
+                                        
                                         when (tool.type) {
-                                            ToolType.EDIT -> {}
+                                            ToolType.EDIT -> { isPlainFileSave = false }
                                             ToolType.COMBINE_SPLIT -> {
                                                 if (combineSplitMode == "combine") {
-                                                    PdfOperations.mergePdfs(selectedFiles, outFile)
-                                                    withContext(Dispatchers.Main) {
-                                                        resultFile = outFile
-                                                        addLog("Documents merged.", LogType.SUCCESS)
-                                                        saveToDownloads(outFile, "merged_output.pdf")
-                                                    }
+                                                    addLog("Combining documents...")
+                                                    outputBytes = pdfEngine.mergePdfs(selectedFiles)
+                                                    finalName = "merged_output.pdf"
+                                                    addLog("Documents merged.", LogType.SUCCESS)
                                                 } else {
-                                                    PdfOperations.splitPdf(selectedFiles[0], splitsInput, outFile)
-                                                    withContext(Dispatchers.Main) {
-                                                        resultFile = outFile
-                                                        addLog("Document pages split successfully.", LogType.SUCCESS)
-                                                        saveToDownloads(outFile, "split_output.pdf")
-                                                    }
+                                                    addLog("Splitting document...")
+                                                    outputBytes = pdfEngine.splitPdf(selectedFiles[0], splitsInput)
+                                                    finalName = "split_output.pdf"
+                                                    addLog("Document pages split successfully.", LogType.SUCCESS)
                                                 }
                                             }
                                             ToolType.CONVERT_OCR -> {
                                                 if (convertOcrMode == "img_to_pdf") {
-                                                    PdfOperations.imagesToPdf(selectedFiles, outFile)
-                                                    withContext(Dispatchers.Main) {
-                                                        resultFile = outFile
-                                                        addLog("Images compiled to PDF.", LogType.SUCCESS)
-                                                        saveToDownloads(outFile, "compiled_images.pdf")
-                                                    }
+                                                    addLog("Compiling images to PDF...")
+                                                    outputBytes = pdfEngine.imagesToPdf(selectedFiles)
+                                                    finalName = "compiled_images.pdf"
+                                                    addLog("Images compiled to PDF.", LogType.SUCCESS)
                                                 } else if (convertOcrMode == "pdf_to_img") {
-                                                    val bitmap = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], 0, 2.0f)
-                                                    if (bitmap != null) {
-                                                        FileOutputStream(outFile).use { out ->
-                                                            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-                                                        }
-                                                        withContext(Dispatchers.Main) {
-                                                            resultFile = outFile
-                                                            addLog("PDF page 1 exported to image.", LogType.SUCCESS)
-                                                            saveToDownloads(outFile, "pdf_page_1.jpg")
-                                                        }
+                                                    addLog("Rendering page to image...")
+                                                    val pageImages = pdfEngine.renderPdfPages(selectedFiles[0])
+                                                    if (pageImages.isNotEmpty()) {
+                                                        outputBytes = pageImages[0]
+                                                        finalName = "pdf_page_1.png"
+                                                        addLog("PDF page 1 exported to image.", LogType.SUCCESS)
                                                     } else {
                                                         throw Exception("Failed to render page to image.")
                                                     }
                                                 } else { // OCR Mode
-                                                    if (geminiApiKey.isEmpty()) {
+                                                    isPlainFileSave = false
+                                                    val apiKey = settingsStorage.getString("gemini_api_key", "")
+                                                    if (apiKey.isEmpty()) {
                                                         throw Exception("Gemini API Key missing in Settings dialog.")
                                                     }
-                                                    val bmp = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], 0, 2.0f)
-                                                        ?: throw Exception("Failed to render page for OCR scanner.")
-                                                    val ocrResult = OcrHelper.performOcr(bmp, geminiApiKey)
-                                                    withContext(Dispatchers.Main) {
-                                                        ocrResult.fold(
-                                                            onSuccess = { text ->
-                                                                extractedOcrText = text
-                                                                addLog("OCR scan completed.", LogType.SUCCESS)
-                                                            },
-                                                            onFailure = { err ->
-                                                                addLog("OCR failed: ${err.message}", LogType.ERROR)
-                                                            }
-                                                        )
+                                                    addLog("Running OCR scanner...")
+                                                    val pagesBytes = pdfEngine.renderPdfPages(selectedFiles[0])
+                                                    if (pagesBytes.isEmpty()) {
+                                                        throw Exception("Failed to render page for OCR scanner.")
                                                     }
+                                                    val ocrResult = OcrHelper.performOcr(pagesBytes[0], apiKey)
+                                                    ocrResult.fold(
+                                                        onSuccess = { text ->
+                                                            extractedOcrText = text
+                                                            addLog("OCR scan completed.", LogType.SUCCESS)
+                                                        },
+                                                        onFailure = { err ->
+                                                            addLog("OCR failed: ${err.message}", LogType.ERROR)
+                                                        }
+                                                    )
                                                 }
                                             }
                                             ToolType.SECURITY -> {
@@ -2623,43 +2453,47 @@ fun ToolWorkspace(
                                                     throw Exception("Password parameter cannot be blank.")
                                                 }
                                                 if (securityIsLocked) {
-                                                    PdfOperations.unlockPdf(selectedFiles[0], passwordInput, outFile)
-                                                    withContext(Dispatchers.Main) {
-                                                        resultFile = outFile
-                                                        addLog("Document unlocked successfully.", LogType.SUCCESS)
-                                                        saveToDownloads(outFile, "unlocked_output.pdf")
-                                                    }
+                                                    addLog("Decrypting document...")
+                                                    outputBytes = pdfEngine.unlockPdf(selectedFiles[0], passwordInput)
+                                                    finalName = "unlocked_output.pdf"
+                                                    addLog("Document unlocked successfully.", LogType.SUCCESS)
                                                 } else {
-                                                    PdfOperations.protectPdf(selectedFiles[0], passwordInput, outFile)
-                                                    withContext(Dispatchers.Main) {
-                                                        resultFile = outFile
-                                                        addLog("Document encrypted successfully.", LogType.SUCCESS)
-                                                        saveToDownloads(outFile, "encrypted_output.pdf")
-                                                    }
+                                                    addLog("Encrypting document...")
+                                                    outputBytes = pdfEngine.protectPdf(selectedFiles[0], passwordInput)
+                                                    finalName = "encrypted_output.pdf"
+                                                    addLog("Document encrypted successfully.", LogType.SUCCESS)
                                                 }
                                             }
                                             ToolType.COMPARE -> {
-                                                val bmp1 = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[0], 0, 1.5f)
-                                                val bmp2 = PdfRendererHelper.renderPageToBitmap(context, selectedFiles[1], 0, 1.5f)
-                                                if (bmp1 != null && bmp2 != null) {
-                                                    val (diffBmp, count) = CompareHelper.compareBitmaps(bmp1, bmp2)
-                                                    withContext(Dispatchers.Main) {
-                                                        compareDiffResult = diffBmp
-                                                        addLog("Compared pages. Detected $count differing pixels.", LogType.SUCCESS)
-                                                    }
+                                                isPlainFileSave = false
+                                                addLog("Rendering documents for comparison...")
+                                                val p1 = pdfEngine.renderPdfPages(selectedFiles[0])
+                                                val p2 = pdfEngine.renderPdfPages(selectedFiles[1])
+                                                if (p1.isNotEmpty() && p2.isNotEmpty()) {
+                                                    addLog("Comparing page pixels...")
+                                                    val (diffBmp, count) = CompareHelper.compareBitmaps(p1[0], p2[0])
+                                                    compareDiffResult = diffBmp
+                                                    addLog("Compared pages. Detected $count differing pixels.", LogType.SUCCESS)
                                                 } else {
-                                                    withContext(Dispatchers.Main) { addLog("Error rendering inputs for comparison.", LogType.ERROR) }
+                                                    throw Exception("Error rendering inputs for comparison.")
                                                 }
                                             }
                                         }
+                                        
+                                        if (isPlainFileSave) {
+                                            val outFile = InMemoryPlatformFile(
+                                                name = finalName,
+                                                size = outputBytes.size.toLong(),
+                                                path = finalName,
+                                                bytes = outputBytes
+                                            )
+                                            resultFile = outFile
+                                            saveToDownloads(outFile, finalName)
+                                        }
                                     } catch (e: Exception) {
-                                        withContext(Dispatchers.Main) {
-                                            addLog("Execution failed: ${e.message}", LogType.ERROR)
-                                        }
+                                        addLog("Execution failed: ${e.message}", LogType.ERROR)
                                     } finally {
-                                        withContext(Dispatchers.Main) {
-                                            isProcessing = false
-                                        }
+                                        isProcessing = false
                                     }
                                 }
                             },
@@ -2704,7 +2538,7 @@ fun ToolWorkspace(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Image(
-                        bitmap = bmp.asImageBitmap(),
+                        bitmap = bmp,
                         contentDescription = "Comparison result",
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2810,48 +2644,12 @@ fun ToolWorkspace(
                         // Open Document Action
                         Button(
                             onClick = {
-                                try {
-                                    val authority = "com.example.officepdf.fileprovider"
-                                    val uri = FileProvider.getUriForFile(context, authority, file)
-                                    val mimeType = context.contentResolver.getType(uri) ?: when (file.extension.lowercase()) {
-                                        "pdf" -> "application/pdf"
-                                        "jpg", "jpeg" -> "image/jpeg"
-                                        "png" -> "image/png"
-                                        else -> "*/*"
-                                    }
-                                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                                        setDataAndType(uri, mimeType)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "No app found to open this file format.", Toast.LENGTH_SHORT).show()
-                                }
+                                fileOperations.viewFile(file.path)
                             },
                             modifier = Modifier
                                 .weight(1f)
                                 .height(56.dp)
-                                .bounceClick {
-                                    try {
-                                        val authority = "com.example.officepdf.fileprovider"
-                                        val uri = FileProvider.getUriForFile(context, authority, file)
-                                        val mimeType = context.contentResolver.getType(uri) ?: when (file.extension.lowercase()) {
-                                            "pdf" -> "application/pdf"
-                                            "jpg", "jpeg" -> "image/jpeg"
-                                            "png" -> "image/png"
-                                            else -> "*/*"
-                                        }
-                                        val intent = Intent(Intent.ACTION_VIEW).apply {
-                                            setDataAndType(uri, mimeType)
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
-                                        context.startActivity(intent)
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "No app found to open this file format.", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
+                                .bounceClick { },
                             shape = RoundedCornerShape(24.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
@@ -2874,48 +2672,12 @@ fun ToolWorkspace(
                         // Share Action
                         FilledTonalButton(
                             onClick = {
-                                try {
-                                    val authority = "com.example.officepdf.fileprovider"
-                                    val uri = FileProvider.getUriForFile(context, authority, file)
-                                    val mimeType = context.contentResolver.getType(uri) ?: when (file.extension.lowercase()) {
-                                        "pdf" -> "application/pdf"
-                                        "jpg", "jpeg" -> "image/jpeg"
-                                        "png" -> "image/png"
-                                        else -> "*/*"
-                                    }
-                                    val intent = Intent(Intent.ACTION_SEND).apply {
-                                        type = mimeType
-                                        putExtra(Intent.EXTRA_STREAM, uri)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    }
-                                    context.startActivity(Intent.createChooser(intent, "Share Document"))
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Failed to share file.", Toast.LENGTH_SHORT).show()
-                                }
+                                fileOperations.shareFile(file.path)
                             },
                             modifier = Modifier
                                 .weight(1f)
                                 .height(56.dp)
-                                .bounceClick {
-                                    try {
-                                        val authority = "com.example.officepdf.fileprovider"
-                                        val uri = FileProvider.getUriForFile(context, authority, file)
-                                        val mimeType = context.contentResolver.getType(uri) ?: when (file.extension.lowercase()) {
-                                            "pdf" -> "application/pdf"
-                                            "jpg", "jpeg" -> "image/jpeg"
-                                            "png" -> "image/png"
-                                            else -> "*/*"
-                                        }
-                                        val intent = Intent(Intent.ACTION_SEND).apply {
-                                            type = mimeType
-                                            putExtra(Intent.EXTRA_STREAM, uri)
-                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        }
-                                        context.startActivity(Intent.createChooser(intent, "Share Document"))
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "Failed to share file.", Toast.LENGTH_SHORT).show()
-                                    }
-                                },
+                                .bounceClick { },
                             shape = RoundedCornerShape(24.dp),
                             colors = ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -3051,24 +2813,27 @@ fun ToolWorkspace(
             ExtendedFloatingActionButton(
                 onClick = {
                     if (!isProcessing) {
-                        coroutineScope.launch(Dispatchers.IO) {
+                        coroutineScope.launch(Dispatchers.Default) {
                             withContext(Dispatchers.Main) {
                                 isProcessing = true
                                 resultFile = null
                                 addLog("Saving document changes...", LogType.INFO)
                             }
                             try {
-                                val outDir = context.cacheDir
-                                val outFile = File(outDir, "edited_${System.currentTimeMillis()}.pdf")
-                                PdfOperations.processPdfWorkspace(
+                                val outputBytes = pdfEngine.processPdfWorkspace(
                                     inputFile = selectedFiles[0],
                                     keptPageIndices = selectedPageIndices,
                                     pageRotations = pageRotations,
                                     pageCrops = pageCrops,
                                     overlays = pageOverlays,
                                     watermarkText = if (hasWatermark) watermarkText else null,
-                                    hasPageNumbers = hasPageNumbers,
-                                    outputFile = outFile
+                                    hasPageNumbers = hasPageNumbers
+                                )
+                                val outFile = InMemoryPlatformFile(
+                                    name = "edited_output.pdf",
+                                    size = outputBytes.size.toLong(),
+                                    path = "edited_output.pdf",
+                                    bytes = outputBytes
                                 )
                                 withContext(Dispatchers.Main) {
                                     resultFile = outFile
@@ -3151,7 +2916,11 @@ fun ToolWorkspace(
                                 ExpressiveActionButton(
                                     onClick = {
                                         targetInsertPosition = selectedPageIndices.size
-                                        insertPdfPicker.launch(arrayOf("application/pdf"))
+                                        filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                            if (files.isNotEmpty()) {
+                                                onInsertPdfPicked(files[0])
+                                            }
+                                        }
                                     },
                                     label = "Add PDF",
                                     icon = Icons.Rounded.Add,
@@ -3286,7 +3055,7 @@ fun ToolWorkspace(
                                         Box(modifier = Modifier.fillMaxSize()) {
                                             if (pageIdx < pdfPagesBitmaps.size) {
                                                 Image(
-                                                    bitmap = pdfPagesBitmaps[pageIdx].asImageBitmap(),
+                                                    bitmap = pdfPagesBitmaps[pageIdx],
                                                     contentDescription = null,
                                                     modifier = Modifier
                                                         .fillMaxSize()
@@ -3440,7 +3209,11 @@ fun ToolWorkspace(
                                         val targetIdx = pagePos
                                         activeMenuPageIdx = null
                                         targetInsertPosition = targetIdx
-                                        insertPdfPicker.launch(arrayOf("application/pdf"))
+                                        filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                            if (files.isNotEmpty()) {
+                                                onInsertPdfPicked(files[0])
+                                            }
+                                        }
                                     }
                                 },
                             shape = RoundedCornerShape(24.dp),
@@ -3467,7 +3240,11 @@ fun ToolWorkspace(
                                         val targetIdx = pagePos + 1
                                         activeMenuPageIdx = null
                                         targetInsertPosition = targetIdx
-                                        insertPdfPicker.launch(arrayOf("application/pdf"))
+                                        filePicker.pickFiles(listOf("pdf"), false) { files ->
+                                            if (files.isNotEmpty()) {
+                                                onInsertPdfPicked(files[0])
+                                            }
+                                        }
                                     }
                                 },
                             shape = RoundedCornerShape(24.dp),
@@ -3626,20 +3403,20 @@ fun ToolWorkspace(
                             modifier = Modifier
                                 .weight(1f)
                                 .bounceClick {
-                                    android.util.Log.d("OFFICEPDF", "Organize clicked, launching coroutine")
+                                    println("Organize clicked, launching coroutine")
                                     coroutineScope.launch {
                                         try {
-                                            android.util.Log.d("OFFICEPDF", "Calling editOptionsSheetState.hide()")
+                                            println("Calling editOptionsSheetState.hide()")
                                             editOptionsSheetState.hide()
-                                            android.util.Log.d("OFFICEPDF", "editOptionsSheetState.hide() completed")
+                                            println("editOptionsSheetState.hide() completed")
                                         } catch (e: Exception) {
-                                            android.util.Log.e("OFFICEPDF", "Error hiding sheet: ${e.message}", e)
+                                            println("Error hiding sheet: ${e.message}")
                                         }
-                                        android.util.Log.d("OFFICEPDF", "Setting showEditOptionsSheet = false")
+                                        println("Setting showEditOptionsSheet = false")
                                         showEditOptionsSheet = false
-                                        android.util.Log.d("OFFICEPDF", "Delaying 150ms")
+                                        println("Delaying 150ms")
                                         delay(150)
-                                        android.util.Log.d("OFFICEPDF", "Setting showOrganizeDialog = true")
+                                        println("Setting showOrganizeDialog = true")
                                         showOrganizeDialog = true
                                     }
                                 },
@@ -3663,7 +3440,8 @@ fun ToolWorkspace(
                                 .weight(1f)
                                 .bounceClick {
                                     showEditOptionsSheet = false
-                                    val newText = PdfOperations.PageOverlay(
+                                    val newText = PageOverlay(
+                                        id = "overlay_${getCurrentTimeMillis()}",
                                         type = "text",
                                         text = "Double tap to edit",
                                         xFraction = 0.3f,
@@ -3705,7 +3483,11 @@ fun ToolWorkspace(
                                             editOptionsSheetState.hide()
                                         } catch (e: Exception) {}
                                         showEditOptionsSheet = false
-                                        overlayImagePicker.launch("image/*")
+                                        filePicker.pickFiles(listOf("jpg", "jpeg", "png"), false) { files ->
+                                            if (files.isNotEmpty()) {
+                                                handlePickedOverlayImage(files[0])
+                                            }
+                                        }
                                     }
                                 },
                             shape = RoundedCornerShape(16.dp),
@@ -3728,7 +3510,8 @@ fun ToolWorkspace(
                                 .weight(1f)
                                 .bounceClick {
                                     showEditOptionsSheet = false
-                                    val newSig = PdfOperations.PageOverlay(
+                                    val newSig = PageOverlay(
+                                        id = "overlay_${getCurrentTimeMillis()}",
                                         type = "signature",
                                         text = sigText,
                                         xFraction = 0.3f,
@@ -3954,10 +3737,10 @@ fun SettingsDialog(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Icon(
-                    painter = painterResource(id = R.drawable.ic_app_logo),
+                    imageVector = Icons.Rounded.Description,
                     contentDescription = null,
                     modifier = Modifier.size(28.dp),
-                    tint = Color.Unspecified
+                    tint = MaterialTheme.colorScheme.primary
                 )
                 Text("Settings")
             }
@@ -4115,10 +3898,11 @@ fun CategoryChip(selected: Boolean, onClick: () -> Unit, label: String) {
 
 @Composable
 fun RecentFilesTab(
-    onReRunTool: (String) -> Unit
+    onReRunTool: (String) -> Unit,
+    fileOperations: FileOperations,
+    settingsStorage: SettingsStorage
 ) {
-    val context = LocalContext.current
-    var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(context)) }
+    var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(settingsStorage)) }
 
     Column(
         modifier = Modifier
@@ -4139,7 +3923,7 @@ fun RecentFilesTab(
             if (filesList.isNotEmpty()) {
                 TextButton(
                     onClick = {
-                        filesList.forEach { RecentFilesManager.deleteRecentFile(context, it.path) }
+                        filesList.forEach { RecentFilesManager.deleteRecentFile(settingsStorage, it.path) }
                         filesList = listOf()
                     }
                 ) {
@@ -4243,7 +4027,7 @@ fun RecentFilesTab(
 
                             Row {
                                 IconButton(
-                                    onClick = { viewFileExternally(context, File(recent.path)) }
+                                    onClick = { fileOperations.viewFile(recent.path) }
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Visibility,
@@ -4252,7 +4036,7 @@ fun RecentFilesTab(
                                     )
                                 }
                                 IconButton(
-                                    onClick = { shareFile(context, File(recent.path)) }
+                                    onClick = { fileOperations.shareFile(recent.path) }
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Share,
@@ -4262,8 +4046,8 @@ fun RecentFilesTab(
                                 }
                                 IconButton(
                                     onClick = {
-                                        RecentFilesManager.deleteRecentFile(context, recent.path)
-                                        filesList = RecentFilesManager.getRecentFiles(context)
+                                        RecentFilesManager.deleteRecentFile(settingsStorage, recent.path)
+                                        filesList = RecentFilesManager.getRecentFiles(settingsStorage)
                                     }
                                 ) {
                                     Icon(
@@ -4282,53 +4066,49 @@ fun RecentFilesTab(
 }
 
 object RecentFilesManager {
-    private const val PREFS_NAME = "RecentFilesPrefs"
     private const val KEY_FILES = "recent_files"
 
-    fun saveRecentFile(context: Context, filePath: String, operationName: String) {
-        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val currentJson = sharedPrefs.getString(KEY_FILES, "[]") ?: "[]"
+    fun saveRecentFile(settingsStorage: SettingsStorage, path: String, name: String, operationName: String, size: Long) {
         try {
-            val jsonArray = org.json.JSONArray(currentJson)
-            val entry = org.json.JSONObject()
-            entry.put("path", filePath)
-            entry.put("operation", operationName)
-            entry.put("timestamp", System.currentTimeMillis())
+            val list = getRecentFiles(settingsStorage).toMutableList()
+            list.removeAll { it.path == path }
             
-            val newList = mutableListOf<org.json.JSONObject>()
-            newList.add(entry)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                if (obj.getString("path") != filePath) {
-                    newList.add(obj)
-                }
+            val newFile = RecentFile(
+                path = path,
+                name = name,
+                operation = operationName,
+                timestamp = getCurrentTimeMillis(),
+                size = size
+            )
+            list.add(0, newFile)
+            
+            val limited = list.take(20)
+            val serialized = limited.joinToString(";;") {
+                "${it.path}||${it.name}||${it.operation}||${it.timestamp}||${it.size}"
             }
-            
-            val saveArray = org.json.JSONArray()
-            newList.take(20).forEach { saveArray.put(it) }
-            sharedPrefs.edit().putString(KEY_FILES, saveArray.toString()).apply()
+            settingsStorage.putString(KEY_FILES, serialized)
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    fun getRecentFiles(context: Context): List<RecentFile> {
-        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val currentJson = sharedPrefs.getString(KEY_FILES, "[]") ?: "[]"
+    fun getRecentFiles(settingsStorage: SettingsStorage): List<RecentFile> {
+        val serialized = settingsStorage.getString(KEY_FILES, "")
+        if (serialized.isEmpty()) return emptyList()
         val list = mutableListOf<RecentFile>()
         try {
-            val jsonArray = org.json.JSONArray(currentJson)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val file = File(obj.getString("path"))
-                if (file.exists()) {
+            val parts = serialized.split(";;")
+            for (p in parts) {
+                if (p.isEmpty()) continue
+                val fields = p.split("||")
+                if (fields.size >= 5) {
                     list.add(
                         RecentFile(
-                            path = obj.getString("path"),
-                            name = file.name,
-                            operation = obj.getString("operation"),
-                            timestamp = obj.getLong("timestamp"),
-                            size = file.length()
+                            path = fields[0],
+                            name = fields[1],
+                            operation = fields[2],
+                            timestamp = fields[3].toLongOrNull() ?: 0L,
+                            size = fields[4].toLongOrNull() ?: 0L
                         )
                     )
                 }
@@ -4339,19 +4119,14 @@ object RecentFilesManager {
         return list
     }
 
-    fun deleteRecentFile(context: Context, filePath: String) {
-        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val currentJson = sharedPrefs.getString(KEY_FILES, "[]") ?: "[]"
+    fun deleteRecentFile(settingsStorage: SettingsStorage, filePath: String) {
         try {
-            val jsonArray = org.json.JSONArray(currentJson)
-            val saveArray = org.json.JSONArray()
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                if (obj.getString("path") != filePath) {
-                    saveArray.put(obj)
-                }
+            val list = getRecentFiles(settingsStorage).toMutableList()
+            list.removeAll { it.path == filePath }
+            val serialized = list.joinToString(";;") {
+                "${it.path}||${it.name}||${it.operation}||${it.timestamp}||${it.size}"
             }
-            sharedPrefs.edit().putString(KEY_FILES, saveArray.toString()).apply()
+            settingsStorage.putString(KEY_FILES, serialized)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -4367,32 +4142,6 @@ fun groupedListItemShape(index: Int, totalCount: Int): Shape {
     }
 }
 
-fun shareFile(context: Context, file: File) {
-    try {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/pdf"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(intent, "Share PDF"))
-    } catch (e: Exception) {
-        Toast.makeText(context, "Error sharing file: ${e.message}", Toast.LENGTH_SHORT).show()
-    }
-}
-
-fun viewFileExternally(context: Context, file: File) {
-    try {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/pdf")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(intent)
-    } catch (e: Exception) {
-        Toast.makeText(context, "No app found to open PDF files", Toast.LENGTH_SHORT).show()
-    }
-}
 
 data class SelectorItem(
     val id: String,
@@ -4657,11 +4406,12 @@ fun UnifiedCanvasHud(
 @Composable
 fun HomeScreen(
     tools: List<Tool>,
+    settingsStorage: SettingsStorage,
+    fileOperations: FileOperations,
     onToolClick: (Tool) -> Unit,
     onRecentFileClick: (RecentFile) -> Unit
 ) {
-    val context = LocalContext.current
-    var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(context)) }
+    var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(settingsStorage)) }
     val scrollState = rememberScrollState()
 
     Column(
@@ -4674,7 +4424,7 @@ fun HomeScreen(
         // Welcome and time-based greeting
         Column {
             val greeting = remember {
-                val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+                val hour = getCurrentHour()
                 when {
                     hour < 12 -> "Good morning"
                     hour < 17 -> "Good afternoon"
@@ -4758,7 +4508,7 @@ fun HomeScreen(
                 if (filesList.isNotEmpty()) {
                     TextButton(
                         onClick = {
-                            filesList.forEach { RecentFilesManager.deleteRecentFile(context, it.path) }
+                            filesList.forEach { RecentFilesManager.deleteRecentFile(settingsStorage, it.path) }
                             filesList = listOf()
                         }
                     ) {
@@ -4867,7 +4617,7 @@ fun HomeScreen(
 
                                 Row {
                                     IconButton(
-                                        onClick = { viewFileExternally(context, File(recent.path)) }
+                                        onClick = { fileOperations.viewFile(recent.path) }
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Visibility,
@@ -4876,7 +4626,7 @@ fun HomeScreen(
                                         )
                                     }
                                     IconButton(
-                                        onClick = { shareFile(context, File(recent.path)) }
+                                        onClick = { fileOperations.shareFile(recent.path) }
                                     ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Share,

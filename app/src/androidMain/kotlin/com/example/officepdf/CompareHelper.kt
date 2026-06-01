@@ -1,10 +1,13 @@
 package com.example.officepdf
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import kotlin.math.abs
 
-object CompareHelper {
+actual object CompareHelper {
 
     /**
      * Compares two bitmaps pixel-by-pixel.
@@ -59,5 +62,12 @@ object CompareHelper {
         }
 
         return Pair(diffBitmap, diffPixelsCount)
+    }
+
+    actual suspend fun compareBitmaps(bytes1: ByteArray, bytes2: ByteArray): Pair<ImageBitmap, Int> {
+        val img1 = BitmapFactory.decodeByteArray(bytes1, 0, bytes1.size)
+        val img2 = BitmapFactory.decodeByteArray(bytes2, 0, bytes2.size)
+        val (diff, count) = compareBitmaps(img1, img2)
+        return Pair(diff.asImageBitmap(), count)
     }
 }

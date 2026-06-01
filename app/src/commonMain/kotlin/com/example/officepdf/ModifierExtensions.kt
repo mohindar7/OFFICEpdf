@@ -13,8 +13,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalView
-import android.view.HapticFeedbackConstants
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 
 fun Modifier.bounceClick(
     scaleDown: Float = 0.95f,
@@ -33,7 +33,7 @@ fun Modifier.bounceClick(
         label = "bounce"
     )
 
-    val view = LocalView.current
+    val haptic = LocalHapticFeedback.current
 
     this
         .graphicsLayer { scaleX = scale; scaleY = scale }
@@ -42,7 +42,11 @@ fun Modifier.bounceClick(
             indication = null,
             enabled = enabled,
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                try {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                } catch (e: Exception) {
+                    // Suppress haptic errors on platforms that do not support it
+                }
                 onClick()
             }
         )
@@ -68,7 +72,7 @@ fun Modifier.combinedBounceClick(
         label = "bounce"
     )
 
-    val view = LocalView.current
+    val haptic = LocalHapticFeedback.current
 
     this
         .graphicsLayer { scaleX = scale; scaleY = scale }
@@ -79,9 +83,12 @@ fun Modifier.combinedBounceClick(
             onDoubleClick = onDoubleClick,
             onLongClick = onLongClick,
             onClick = {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                try {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                } catch (e: Exception) {
+                    // Suppress haptic errors
+                }
                 onClick()
             }
         )
 }
-
