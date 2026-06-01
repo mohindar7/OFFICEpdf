@@ -158,103 +158,151 @@ fun MainAppScreen(
         MaterialTheme.colorScheme.background
     }
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val isDesktop = maxWidth >= 720.dp
+
+        Row(modifier = Modifier.fillMaxSize()) {
+            if (isDesktop && activeTool == null) {
+                NavigationRail(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                    header = {
                         Icon(
                             imageVector = Icons.Rounded.Description,
                             contentDescription = null,
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(32.dp).padding(vertical = 12.dp),
                             tint = MaterialTheme.colorScheme.primary
                         )
-                        Text(
-                            text = "office pdf",
-                            fontWeight = FontWeight.Light,
-                            letterSpacing = 1.sp,
-                            fontFamily = FontFamily.SansSerif,
-                            fontSize = 24.sp
-                        )
                     }
-                },
-                navigationIcon = {
-                    if (activeTool != null) {
-                        IconButton(
-                            onClick = { activeTool = null },
-                            modifier = Modifier.bounceClick { activeTool = null }
-                        ) {
-                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Back to Home")
-                        }
-                    } else if (currentTab != AppTab.HOME) {
-                        IconButton(
-                            onClick = { currentTab = AppTab.HOME },
-                            modifier = Modifier.bounceClick { currentTab = AppTab.HOME }
-                        ) {
-                            Icon(Icons.Rounded.ArrowBack, contentDescription = "Back to Home")
-                        }
-                    }
-                },
-                actions = {
-                    if (topBarActionLabel != null && onTopBarActionClick != null) {
-                        ExpressiveActionButton(
-                            onClick = { onTopBarActionClick?.invoke() },
-                            label = topBarActionLabel!!,
-                            enabled = topBarActionEnabled,
-                            icon = Icons.Rounded.Save
-                        )
-                    } else {
-                        IconButton(
-                            onClick = { showSettingsDialog = true },
-                            modifier = Modifier.bounceClick { showSettingsDialog = true }
-                        ) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings")
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = workspaceBgColor
-                )
-            )
-        },
-        bottomBar = {
-            if (activeTool == null) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    tonalElevation = 2.dp
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ExpressiveNavigationBarItem(
-                            selected = currentTab == AppTab.HOME,
-                            onClick = { currentTab = AppTab.HOME },
-                            icon = Icons.Rounded.Home,
-                            label = "Home"
+                    Spacer(modifier = Modifier.height(16.dp))
+                    NavigationRailItem(
+                        selected = currentTab == AppTab.HOME,
+                        onClick = { currentTab = AppTab.HOME },
+                        icon = { Icon(Icons.Rounded.Home, contentDescription = "Home") },
+                        label = { Text("Home") },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer
                         )
-                        ExpressiveNavigationBarItem(
-                            selected = currentTab == AppTab.RECENTS,
-                            onClick = { currentTab = AppTab.RECENTS },
-                            icon = Icons.Rounded.History,
-                            label = "Recents"
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    NavigationRailItem(
+                        selected = currentTab == AppTab.RECENTS,
+                        onClick = { currentTab = AppTab.RECENTS },
+                        icon = { Icon(Icons.Rounded.History, contentDescription = "Recents") },
+                        label = { Text("Recents") },
+                        colors = NavigationRailItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            selectedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer
                         )
-                    }
+                    )
                 }
             }
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .background(workspaceBgColor)
-        ) {
+
+            Scaffold(
+                modifier = Modifier.weight(1f),
+                topBar = {
+                    CenterAlignedTopAppBar(
+                        title = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Description,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(32.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "office pdf",
+                                    fontWeight = FontWeight.Light,
+                                    letterSpacing = 1.sp,
+                                    fontFamily = FontFamily.SansSerif,
+                                    fontSize = 24.sp
+                                )
+                            }
+                        },
+                        navigationIcon = {
+                            if (activeTool != null) {
+                                IconButton(
+                                    onClick = { activeTool = null },
+                                    modifier = Modifier.bounceClick { activeTool = null }
+                                ) {
+                                    Icon(Icons.Rounded.ArrowBack, contentDescription = "Back to Home")
+                                }
+                            } else if (currentTab != AppTab.HOME) {
+                                IconButton(
+                                    onClick = { currentTab = AppTab.HOME },
+                                    modifier = Modifier.bounceClick { currentTab = AppTab.HOME }
+                                ) {
+                                    Icon(Icons.Rounded.ArrowBack, contentDescription = "Back to Home")
+                                }
+                            }
+                        },
+                        actions = {
+                            if (topBarActionLabel != null && onTopBarActionClick != null) {
+                                ExpressiveActionButton(
+                                    onClick = { onTopBarActionClick?.invoke() },
+                                    label = topBarActionLabel!!,
+                                    enabled = topBarActionEnabled,
+                                    icon = Icons.Rounded.Save
+                                )
+                            } else {
+                                IconButton(
+                                    onClick = { showSettingsDialog = true },
+                                    modifier = Modifier.bounceClick { showSettingsDialog = true }
+                                ) {
+                                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                            containerColor = workspaceBgColor
+                        )
+                    )
+                },
+                bottomBar = {
+                    if (!isDesktop && activeTool == null) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().navigationBarsPadding(),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            tonalElevation = 2.dp
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ExpressiveNavigationBarItem(
+                                    selected = currentTab == AppTab.HOME,
+                                    onClick = { currentTab = AppTab.HOME },
+                                    icon = Icons.Rounded.Home,
+                                    label = "Home"
+                                )
+                                ExpressiveNavigationBarItem(
+                                    selected = currentTab == AppTab.RECENTS,
+                                    onClick = { currentTab = AppTab.RECENTS },
+                                    icon = Icons.Rounded.History,
+                                    label = "Recents"
+                                )
+                            }
+                        }
+                    }
+                }
+            ) { paddingValues ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues)
+                        .background(workspaceBgColor)
+                ) {
             AnimatedContent(
                 targetState = activeTool,
                 transitionSpec = {
@@ -669,6 +717,8 @@ fun MainAppScreen(
                     }
                 )
             }
+        }
+    }
         }
     }
 }
@@ -1755,17 +1805,17 @@ fun ToolWorkspace(
                 }
             }
         } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(workspaceScrollState, enabled = selectedOverlayId == null && zoomScale == 1f)
-                    .padding(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 16.dp,
-                        bottom = 16.dp
-                    )
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.TopCenter
             ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .widthIn(max = 1000.dp)
+                        .verticalScroll(workspaceScrollState, enabled = selectedOverlayId == null && zoomScale == 1f)
+                        .padding(16.dp)
+                ) {
             // Immersive title
             if (tool.type != ToolType.EDIT || selectedFiles.isEmpty()) {
                 Text(
@@ -3715,6 +3765,7 @@ fun ToolWorkspace(
                     }
                 }
             }
+            }
         }
     }
 }
@@ -3904,11 +3955,16 @@ fun RecentFilesTab(
 ) {
     var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(settingsStorage)) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 1000.dp)
+                .padding(16.dp)
+        ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -4062,6 +4118,7 @@ fun RecentFilesTab(
                 }
             }
         }
+    }
     }
 }
 
@@ -4414,13 +4471,18 @@ fun HomeScreen(
     var filesList by remember { mutableStateOf(RecentFilesManager.getRecentFiles(settingsStorage)) }
     val scrollState = rememberScrollState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight()
+                .widthIn(max = 1000.dp)
+                .verticalScroll(scrollState)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
         // Welcome and time-based greeting
         Column {
             val greeting = remember {
@@ -4642,6 +4704,7 @@ fun HomeScreen(
             }
         }
         Spacer(modifier = Modifier.height(16.dp))
+    }
     }
 }
 
