@@ -328,7 +328,8 @@ object PdfOperations {
         val yFraction: Float,
         val widthFraction: Float,
         val heightFraction: Float,
-        val pageNumber: Int // 1-indexed
+        val pageNumber: Int, // 1-indexed
+        val rotation: Float = 0f
     )
 
     fun applyPageOverlays(file: File, overlays: List<PageOverlay>, output: File) {
@@ -342,7 +343,6 @@ object PdfOperations {
                     val pdfHeight = mediaBox.height
 
                     // Convert visual coordinate fractions to PDF coordinates
-                    // PDF coordinates start at bottom-left corner!
                     val pdfX = overlay.xFraction * pdfWidth
                     val pdfY = pdfHeight - (overlay.yFraction * pdfHeight) - (overlay.heightFraction * pdfHeight)
                     val drawWidth = overlay.widthFraction * pdfWidth
@@ -351,13 +351,19 @@ object PdfOperations {
                     PDPageContentStream(doc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { contentStream ->
                         if (overlay.type == "text") {
                             contentStream.beginText()
-                            // Estimate appropriate font size based on height
                             val fontSize = (drawHeight * 0.6f).coerceIn(8f, 72f)
                             contentStream.setFont(PDType1Font.HELVETICA_BOLD, fontSize)
-                            contentStream.setNonStrokingColor(0, 0, 0) // Default black text
+                            contentStream.setNonStrokingColor(0, 0, 0)
 
-                            // Position inside bounds with minor vertical padding
-                            contentStream.newLineAtOffset(pdfX, pdfY + (drawHeight * 0.15f))
+                            val radians = Math.toRadians(overlay.rotation.toDouble())
+                            val centerX = pdfX + drawWidth / 2f
+                            val centerY = pdfY + drawHeight / 2f
+                            val matrix = com.tom_roush.pdfbox.util.Matrix()
+                            matrix.translate(centerX, centerY)
+                            matrix.rotate(radians)
+                            matrix.translate(-drawWidth / 2f, -drawHeight / 2f)
+                            contentStream.setTextMatrix(matrix)
+
                             contentStream.showText(overlay.text)
                             contentStream.endText()
                         } else if (overlay.type == "image") {
@@ -366,7 +372,17 @@ object PdfOperations {
                                 val bitmap = BitmapFactory.decodeFile(imgFile.absolutePath)
                                 if (bitmap != null) {
                                     val pdImage = LosslessFactory.createFromImage(doc, bitmap)
-                                    contentStream.drawImage(pdImage, pdfX, pdfY, drawWidth, drawHeight)
+                                    val radians = Math.toRadians(overlay.rotation.toDouble())
+                                    contentStream.saveGraphicsState()
+                                    val centerX = pdfX + drawWidth / 2f
+                                    val centerY = pdfY + drawHeight / 2f
+                                    val matrix = com.tom_roush.pdfbox.util.Matrix()
+                                    matrix.translate(centerX, centerY)
+                                    matrix.rotate(radians)
+                                    matrix.translate(-drawWidth / 2f, -drawHeight / 2f)
+                                    contentStream.transform(matrix)
+                                    contentStream.drawImage(pdImage, 0f, 0f, drawWidth, drawHeight)
+                                    contentStream.restoreGraphicsState()
                                     bitmap.recycle()
                                 }
                             }
@@ -375,6 +391,174 @@ object PdfOperations {
                 }
             }
             doc.save(output)
+        }
+    }
+
+    fun processPdfWorkspace(
+        inputFile: File,
+        keptPageIndices: List<Int>,
+        pageRotations: Map<Int, Int>,
+        pageCrops: Map<Int, List<Float>>,
+        overlays: List<PageOverlay>,
+        watermarkText: String?,
+        hasPageNumbers: Boolean,
+        outputFile: File
+    ) {
+        PDDocument.load(inputFile).use { originalDoc ->
+            PDDocument().use { workingDoc ->
+                for (idx in keptPageIndices) {
+                    if (idx in 0 until originalDoc.numberOfPages) {
+                        workingDoc.addPage(originalDoc.getPage(idx))
+                    }
+                }
+
+                if (workingDoc.numberOfPages == 0) {
+                    throw Exception("Resulting PDF has 0 pages. Please keep at least one page.")
+                }
+
+                for (i in 0 until workingDoc.numberOfPages) {
+                    val origIdx = keptPageIndices[i]
+
+                    val rotation = pageRotations[origIdx] ?: 0
+                    if (rotation != 0) {
+                        val page = workingDoc.getPage(i)
+                        page.rotation = (page.rotation + rotation) % 360
+                    }
+
+                    val cropMargins = pageCrops[origIdx]
+                    if (cropMargins != null && cropMargins.size == 4) {
+                        val page = workingDoc.getPage(i)
+                        val mediaBox = page.mediaBox
+                        val left = cropMargins[0]
+                        val right = cropMargins[1]
+                        val top = cropMargins[2]
+                        val bottom = cropMargins[3]
+                        page.cropBox = PDRectangle(
+                            mediaBox.lowerLeftX + left,
+                            mediaBox.lowerLeftY + bottom,
+                            mediaBox.width - left - right,
+                            mediaBox.height - top - bottom
+                        )
+                    }
+                }
+
+                for (overlay in overlays) {
+                    val pageIndex = overlay.pageNumber - 1
+                    if (pageIndex in 0 until workingDoc.numberOfPages) {
+                        val page = workingDoc.getPage(pageIndex)
+                        val mediaBox = page.mediaBox
+                        val pdfWidth = mediaBox.width
+                        val pdfHeight = mediaBox.height
+
+                        val pdfX = overlay.xFraction * pdfWidth
+                        val pdfY = pdfHeight - (overlay.yFraction * pdfHeight) - (overlay.heightFraction * pdfHeight)
+                        val drawWidth = overlay.widthFraction * pdfWidth
+                        val drawHeight = overlay.heightFraction * pdfHeight
+
+                        PDPageContentStream(workingDoc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { contentStream ->
+                            if (overlay.type == "text" || overlay.type == "signature") {
+                                contentStream.beginText()
+                                val fontSize = (drawHeight * 0.6f).coerceIn(8f, 72f)
+                                contentStream.setFont(PDType1Font.HELVETICA_BOLD, fontSize)
+                                
+                                if (overlay.type == "signature") {
+                                    contentStream.setNonStrokingColor(10, 10, 100)
+                                } else {
+                                    contentStream.setNonStrokingColor(0, 0, 0)
+                                }
+
+                                val radians = Math.toRadians(overlay.rotation.toDouble())
+                                val centerX = pdfX + drawWidth / 2f
+                                val centerY = pdfY + drawHeight / 2f
+                                val matrix = com.tom_roush.pdfbox.util.Matrix()
+                                matrix.translate(centerX, centerY)
+                                matrix.rotate(radians)
+                                matrix.translate(-drawWidth / 2f, -drawHeight / 2f)
+                                contentStream.setTextMatrix(matrix)
+
+                                contentStream.showText(overlay.text)
+                                contentStream.endText()
+                            } else if (overlay.type == "image") {
+                                val imgFile = File(overlay.imagePath)
+                                if (imgFile.exists()) {
+                                    val bitmap = BitmapFactory.decodeFile(imgFile.absolutePath)
+                                    if (bitmap != null) {
+                                        val pdImage = LosslessFactory.createFromImage(workingDoc, bitmap)
+                                        val radians = Math.toRadians(overlay.rotation.toDouble())
+                                        contentStream.saveGraphicsState()
+                                        val centerX = pdfX + drawWidth / 2f
+                                        val centerY = pdfY + drawHeight / 2f
+                                        val matrix = com.tom_roush.pdfbox.util.Matrix()
+                                        matrix.translate(centerX, centerY)
+                                        matrix.rotate(radians)
+                                        matrix.translate(-drawWidth / 2f, -drawHeight / 2f)
+                                        contentStream.transform(matrix)
+                                        contentStream.drawImage(pdImage, 0f, 0f, drawWidth, drawHeight)
+                                        contentStream.restoreGraphicsState()
+                                        bitmap.recycle()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!watermarkText.isNullOrBlank()) {
+                    for (i in 0 until workingDoc.numberOfPages) {
+                        val page = workingDoc.getPage(i)
+                        val mediaBox = page.mediaBox
+                        val width = mediaBox.width
+                        val height = mediaBox.height
+
+                        PDPageContentStream(workingDoc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { contentStream ->
+                            contentStream.saveGraphicsState()
+                            val extGState = PDExtendedGraphicsState().apply {
+                                nonStrokingAlphaConstant = 0.25f
+                            }
+                            contentStream.setGraphicsStateParameters(extGState)
+
+                            contentStream.beginText()
+                            contentStream.setFont(PDType1Font.HELVETICA_BOLD, 45f)
+                            contentStream.setNonStrokingColor(200, 80, 80)
+
+                            val radians = Math.toRadians(45.0)
+                            val x = width / 2f - 180f
+                            val y = height / 2f - 30f
+                            contentStream.setTextMatrix(Matrix.getRotateInstance(radians, x, y))
+                            contentStream.showText(watermarkText)
+                            contentStream.endText()
+
+                            contentStream.restoreGraphicsState()
+                        }
+                    }
+                }
+
+                if (hasPageNumbers) {
+                    val totalPages = workingDoc.numberOfPages
+                    for (i in 0 until totalPages) {
+                        val page = workingDoc.getPage(i)
+                        val mediaBox = page.mediaBox
+                        val width = mediaBox.width
+
+                        PDPageContentStream(workingDoc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { contentStream ->
+                            contentStream.beginText()
+                            contentStream.setFont(PDType1Font.HELVETICA, 12f)
+                            contentStream.setNonStrokingColor(100, 100, 100)
+
+                            val text = "${i + 1} / $totalPages"
+                            val textWidth = 30f
+                            val x = width / 2f - textWidth
+                            val y = 25f
+
+                            contentStream.newLineAtOffset(x, y)
+                            contentStream.showText(text)
+                            contentStream.endText()
+                        }
+                    }
+                }
+
+                workingDoc.save(outputFile)
+            }
         }
     }
 }
