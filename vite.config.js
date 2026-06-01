@@ -4,7 +4,7 @@ import UnoCSS from 'unocss/vite';
 import { presetUno, presetAttributify, presetIcons } from 'unocss';
 
 export default defineConfig({
-  base: '/pdf-toolkit-app/',
+  base: '/OFFICEpdf/',
   plugins: [
     react(),
     UnoCSS({
